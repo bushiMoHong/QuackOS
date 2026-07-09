@@ -504,10 +504,9 @@ impl Ext4InodeDisk {
         if header.depth > 0 {
             for idx in self.extent_idxs(&header) {
                 let child_block = idx.physical_leaf_block();
-                // TODO: use BlockCache
                 let mut block_data = read_ext4_block(&block_device, child_block);
                 let mut child_node = Ext4ExtentBlock::new(&mut block_data);
-                child_node.iter_all_extents(result);
+                child_node.iter_all_extents(block_device.clone(), result);
             }
         } else {
             result.extend(self.extents(&header).iter().cloned());

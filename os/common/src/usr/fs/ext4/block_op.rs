@@ -10,6 +10,7 @@ use super::super::dev::block_dev::BlockDevice;
 use super::super::types::Errno;
 use super::dentry::Ext4DirEntry;
 use super::extent_tree::{Ext4Extent, Ext4ExtentHeader, Ext4ExtentIdx};
+use super::inode::read_ext4_block;
 
 use super::dentry::EXT4_DT_DIR;
 
@@ -434,11 +435,12 @@ impl<'a> Ext4ExtentBlock<'a> {
     pub fn lookup_extent(
         &self,
         logical_block: u32,
-        _block_device: Arc<dyn BlockDevice>,
+        block_device: Arc<dyn BlockDevice>,
         _ext4_block_size: usize,
     ) -> Option<Ext4Extent> {
         let header = self.extent_header();
         if header.depth == 0 {
+            // Leaf node — scan extents
             let extents = unsafe {
                 core::slice::from_raw_parts(
                     self.block.as_ptr().add(12) as *const Ext4Extent,
@@ -452,34 +454,58 @@ impl<'a> Ext4ExtentBlock<'a> {
                     return Some(*extent);
                 }
             }
-            return None;
+            None
         } else {
+            // Index node — find child block and recurse
             let idxs = unsafe {
                 core::slice::from_raw_parts(
                     self.block.as_ptr().add(12) as *const Ext4ExtentIdx,
                     header.entries as usize,
                 )
             };
-            if let Some(_idx) = idxs.iter().find(|idx| logical_block >= idx.block) {
-                let _block_num = _idx.physical_leaf_block();
-                // TODO: use BlockCache for recursive lookup
-                log::warn!(
-                    "[lookup_extent] recursive extent lookup not yet implemented"
-                );
-                return None;
+            // Find the last index whose block <= logical_block
+            if let Some(idx) = idxs.iter()
+                .filter(|i| i.block <= logical_block)
+                .max_by_key(|i| i.block)
+            {
+                let child_block_num = idx.physical_leaf_block();
+                let mut child_data =
+                    read_ext4_block(&block_device, child_block_num);
+                let child_ext4_block = Ext4ExtentBlock::new(&mut child_data);
+                child_ext4_block.lookup_extent(
+                    logical_block,
+                    block_device,
+                    _ext4_block_size,
+                )
             } else {
-                return None;
+                None
             }
         }
     }
 
-    /// Collect all extents from this (leaf) node.
-    pub fn iter_all_extents(&mut self, result: &mut Vec<Ext4Extent>) {
+    /// Collect all extents from this node, recursively descending into
+    /// index nodes.
+    pub fn iter_all_extents(
+        &mut self,
+        block_device: Arc<dyn BlockDevice>,
+        result: &mut Vec<Ext4Extent>,
+    ) {
         let header = self.extent_header();
         if header.depth > 0 {
-            log::warn!(
-                "[iter_all_extents] index node traversal not implemented"
-            );
+            // Index node — recurse into children
+            let idxs = unsafe {
+                core::slice::from_raw_parts(
+                    self.block.as_ptr().add(12) as *const Ext4ExtentIdx,
+                    header.entries as usize,
+                )
+            };
+            for idx in idxs {
+                let child_block_num = idx.physical_leaf_block();
+                let mut child_data =
+                    read_ext4_block(&block_device, child_block_num);
+                let mut child_block = Ext4ExtentBlock::new(&mut child_data);
+                child_block.iter_all_extents(block_device.clone(), result);
+            }
         } else {
             let extents = unsafe {
                 core::slice::from_raw_parts(

@@ -64,49 +64,125 @@ impl Ext4FileSystem {
         })
     }
 
-    // TODO: uncomment when GroupDesc allocation methods are ported
-    pub fn alloc_inode(&self, _block_device: Arc<dyn BlockDevice>, _is_dir: bool) -> usize {
-        // TODO: implement using GroupDesc::alloc_inode
-        panic!("[Ext4FileSystem::alloc_inode] not yet implemented");
+    pub fn alloc_inode(&self, block_device: Arc<dyn BlockDevice>, is_dir: bool) -> usize {
+        let inode_bitmap_size = self.super_block.inodes_per_group as usize / 8;
+        for (i, group) in self.block_groups.iter().enumerate() {
+            if let Some(local_inode_num) = group.alloc_inode(
+                block_device.clone(),
+                self.block_size(),
+                inode_bitmap_size,
+                is_dir,
+            ) {
+                self.super_block.inner.write().free_inodes_count -= 1;
+                let global_inode_num =
+                    local_inode_num + self.super_block.inodes_per_group as usize * i + 1;
+                return global_inode_num;
+            }
+        }
+        panic!("No available inode!");
     }
 
     pub fn dealloc_inode(
         &self,
-        _block_device: Arc<dyn BlockDevice>,
-        _global_inode_num: usize,
-        _is_dir: bool,
+        block_device: Arc<dyn BlockDevice>,
+        global_inode_num: usize,
+        is_dir: bool,
     ) {
-        // TODO: implement using GroupDesc::dealloc_inode
-        panic!("[Ext4FileSystem::dealloc_inode] not yet implemented");
+        let inode_index = global_inode_num - 1;
+        let group_id = inode_index / self.super_block.inodes_per_group as usize;
+        let local_inode_num = inode_index % self.super_block.inodes_per_group as usize;
+        let block_bitmap_size = self.super_block.inodes_per_group as usize / 8;
+        self.block_groups[group_id].dealloc_inode(
+            block_device.clone(),
+            local_inode_num,
+            is_dir,
+            self.super_block.inode_size as usize,
+            self.block_size(),
+            block_bitmap_size,
+        );
     }
 
     pub fn add_orphan_inode(&self, inode_num: usize) {
         self.super_block.orphan_inodes.write().push(inode_num);
     }
 
-    // TODO: uncomment when GroupDesc allocation methods are ported
-    pub fn alloc_one_block(&self, _block_device: Arc<dyn BlockDevice>) -> usize {
-        // TODO: implement using GroupDesc::alloc_one_block
-        panic!("[Ext4FileSystem::alloc_one_block] not yet implemented");
+    pub fn alloc_one_block(&self, block_device: Arc<dyn BlockDevice>) -> usize {
+        let block_bitmap_size = self.super_block.blocks_per_group as usize / 8;
+        for (i, group) in self.block_groups.iter().enumerate() {
+            if let Some(local_start) = group.alloc_one_block(
+                block_device.clone(),
+                self.block_size(),
+                block_bitmap_size,
+            ) {
+                self.super_block.inner.write().free_blocks_count -= 1;
+                let global_start =
+                    local_start + self.super_block.blocks_per_group as usize * i;
+                // Zero out the newly allocated block
+                let zeroes = [0u8; EXT4_BLOCK_SIZE];
+                self.block_device
+                    .write(global_start * EXT4_BLOCK_SIZE, &zeroes);
+                return global_start;
+            }
+        }
+        panic!("No available block in any block group!");
     }
 
     pub fn alloc_block(
         &self,
-        _block_device: Arc<dyn BlockDevice>,
-        _block_count: usize,
+        block_device: Arc<dyn BlockDevice>,
+        block_count: usize,
     ) -> Vec<(usize, u32)> {
-        // TODO: implement using GroupDesc::alloc_block
-        panic!("[Ext4FileSystem::alloc_block] not yet implemented");
+        let block_bitmap_size = self.super_block.blocks_per_group as usize / 8;
+        let mut result = Vec::new();
+        let mut remaining = block_count;
+
+        for (i, group) in self.block_groups.iter().enumerate() {
+            if remaining == 0 {
+                break;
+            }
+            let allocated = group.alloc_block(
+                block_device.clone(),
+                self.block_size(),
+                block_bitmap_size,
+                remaining,
+            );
+            for (local_start, count) in allocated {
+                let global_start =
+                    local_start + self.super_block.blocks_per_group as usize * i;
+                result.push((global_start, count));
+                remaining -= count as usize;
+                self.super_block.inner.write().free_blocks_count -= count as u64;
+                // Zero out allocated blocks
+                let zeroes = [0u8; EXT4_BLOCK_SIZE];
+                for off in 0..count as usize {
+                    self.block_device
+                        .write((global_start + off) * EXT4_BLOCK_SIZE, &zeroes);
+                }
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        result
     }
 
     pub fn dealloc_block(
         &self,
-        _block_device: Arc<dyn BlockDevice>,
-        _block_num: usize,
-        _block_count: usize,
+        block_device: Arc<dyn BlockDevice>,
+        block_num: usize,
+        block_count: usize,
     ) {
-        // TODO: implement using GroupDesc::dealloc_block
-        panic!("[Ext4FileSystem::dealloc_block] not yet implemented");
+        let group_id = block_num / self.super_block.blocks_per_group as usize;
+        let local_block_num = block_num % self.super_block.blocks_per_group as usize;
+        let block_bitmap_size = self.super_block.blocks_per_group as usize / 8;
+        self.block_groups[group_id].dealloc_block(
+            block_device.clone(),
+            local_block_num,
+            block_count,
+            self.super_block.block_size as usize,
+            block_bitmap_size,
+        );
+        self.super_block.inner.write().free_blocks_count += block_count as u64;
     }
 }
 

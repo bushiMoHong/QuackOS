@@ -1,11 +1,11 @@
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::RwLock;
 
-// TODO: Restore when block_cache methods are uncommented
-// use alloc::sync::Arc;
-// use crate::usr::fs::dev::block_dev::BlockDevice;
-
-// TODO: When block_op and inode modules are ported, uncomment these dependencies
-// use super::{block_op::Ext4Bitmap, inode::Ext4InodeDisk};
+use crate::usr::fs::dev::block_dev::BlockDevice;
+use super::block_op::Ext4Bitmap;
+use super::inode::{read_ext4_block, write_ext4_block, Ext4InodeDisk};
+use super::block_op::EXT4_BLOCK_SIZE;
 
 #[derive(Debug, Clone)]
 #[repr(C)]
@@ -98,11 +98,6 @@ impl GroupDesc {
         }
     }
 
-    // TODO: The following methods depend on block_cache::get_block_cache and
-    // super::{block_op::Ext4Bitmap, inode::Ext4InodeDisk}, which are not yet
-    // ported. Uncomment and restore when those modules are available.
-
-    /*
     /// 在块组的inode_bitmap中分配一个inode
     /// 注意这个inode_num是相对于块组的inode_table的inode_num
     /// 调用者需要将inode_num转换为全局的inode_num(加上inodes_per_group * group_num)
@@ -114,45 +109,27 @@ impl GroupDesc {
         inode_bitmap_size: usize,
         is_dir: bool,
     ) -> Option<usize> {
-        debug_assert!(
-            inode_bitmap_size <= ext4_block_size,
-            "[GroupDesc::alloc_inode] inode_bitmap_size: {}, ext4_block_size: {}",
-            inode_bitmap_size,
-            ext4_block_size
-        );
+        debug_assert!(inode_bitmap_size <= ext4_block_size);
         let mut inner = self.inner.write();
-        log::info!(
-            "[GroupDesc::alloc_inode] free_inode_count: {}",
-            inner.free_inodes_count
-        );
-        // 检查当前块组是否还有空闲的inode
         if inner.free_inodes_count > 0 {
-            // 注意inode_bitmap的size = inodes_per_group / 8 byte
             let num_blocks = (inode_bitmap_size + ext4_block_size - 1) / ext4_block_size;
             for i in 0..num_blocks {
-                // 设置inode位图中的inode为已分配
-                // 修改bg的used_dirs_count, free_inodes_count, checksum, unused_inodes_count
                 let block_id = self.inode_bitmap as usize + i;
-                if let Some(inode_num) = Ext4Bitmap::new(
-                    get_block_cache(block_id, block_device.clone(), ext4_block_size)
-                        .lock()
-                        .get_mut(0),
-                )
-                .alloc(inode_bitmap_size)
-                {
+                let mut block_data = read_ext4_block(&block_device, block_id);
+                let result = Ext4Bitmap::new(&mut block_data).alloc(inode_bitmap_size);
+                if result.is_some() {
+                    write_ext4_block(&block_device, block_id, &block_data);
                     inner.free_inodes_count -= 1;
-                    // TODO: 更新块组的 checksum
                     if is_dir {
                         inner.used_dirs_count += 1;
                     }
-                    return Some(inode_num + (i * ext4_block_size * 8));
+                    return result.map(|n| n + (i * ext4_block_size * 8));
                 }
             }
         }
-        return None;
+        None
     }
-    // 由上层调用者转换为本地(globol_inode_num = local_inode_num + inodes_per_group * group_num)
-    // 既要释放inode_bitmap, 也要释放inode_table
+
     pub fn dealloc_inode(
         &self,
         block_device: Arc<dyn BlockDevice>,
@@ -163,32 +140,35 @@ impl GroupDesc {
         block_bitmap_size: usize,
     ) {
         let mut inner = self.inner.write();
-        // 释放inode_table
-        let block_id = self.inode_table as usize + local_inode_num * inode_size / ext4_block_size;
-        let block_offset = local_inode_num * inode_size % ext4_block_size;
-        get_block_cache(block_id, block_device.clone(), ext4_block_size)
-            .lock()
-            .modify(block_offset, |inode_on_disk: &mut Ext4InodeDisk| {
-                // assert!(inode_on_disk.get_nlinks() == 0);
-                inode_on_disk.set_size(0);
-                inode_on_disk.set_dtime(66666666);
-                inode_on_disk.set_mode(0);
-                inode_on_disk.clear_block();
-            });
-        // 释放inode_bitmap
-        let block_id = self.inode_bitmap as usize + local_inode_num / (ext4_block_size * 8);
-        let block_offset = local_inode_num % (ext4_block_size * 8);
-        Ext4Bitmap::new(
-            get_block_cache(block_id, block_device, ext4_block_size)
-                .lock()
-                .get_mut(0),
-        )
-        .dealloc(block_offset, block_bitmap_size);
+        // Free inode table entry
+        let table_block_id =
+            self.inode_table as usize + local_inode_num * inode_size / ext4_block_size;
+        let table_offset = local_inode_num * inode_size % ext4_block_size;
+        let mut table_data = read_ext4_block(&block_device, table_block_id);
+        unsafe {
+            let inode_ptr =
+                table_data.as_mut_ptr().add(table_offset) as *mut Ext4InodeDisk;
+            (*inode_ptr).set_size(0);
+            (*inode_ptr).set_dtime(66666666);
+            (*inode_ptr).set_mode(0);
+            (*inode_ptr).clear_block();
+        }
+        write_ext4_block(&block_device, table_block_id, &table_data);
+
+        // Free inode bitmap
+        let bitmap_block_id =
+            self.inode_bitmap as usize + local_inode_num / (ext4_block_size * 8);
+        let bitmap_offset = local_inode_num % (ext4_block_size * 8);
+        let mut bitmap_data = read_ext4_block(&block_device, bitmap_block_id);
+        Ext4Bitmap::new(&mut bitmap_data).dealloc(bitmap_offset, block_bitmap_size);
+        write_ext4_block(&block_device, bitmap_block_id, &bitmap_data);
+
         inner.free_inodes_count += 1;
         if is_dir {
             inner.used_dirs_count -= 1;
         }
     }
+
     pub fn alloc_one_block(
         &self,
         block_device: Arc<dyn BlockDevice>,
@@ -197,29 +177,22 @@ impl GroupDesc {
     ) -> Option<usize> {
         let mut inner = self.inner.write();
         let num_blocks = block_bitmap_size / ext4_block_size;
-        // 检查是否有足够的空闲块
-        if inner.free_blocks_count < 1 as u32 {
+        if inner.free_blocks_count < 1 {
             return None;
         }
         for i in 0..num_blocks {
             let block_id = self.block_bitmap as usize + i;
-            if let Some(block_num) = Ext4Bitmap::new(
-                get_block_cache(block_id, block_device.clone(), ext4_block_size)
-                    .lock()
-                    .get_mut(0),
-            )
-            // .alloc(block_bitmap_size)
-            .alloc(block_bitmap_size)
-            // 修改bg的free_blocks_count, checksum
-            {
-                inner.free_blocks_count -= 1 as u32;
-                return Some(block_num + (i * ext4_block_size * 8));
+            let mut block_data = read_ext4_block(&block_device, block_id);
+            let result = Ext4Bitmap::new(&mut block_data).alloc(block_bitmap_size);
+            if result.is_some() {
+                write_ext4_block(&block_device, block_id, &block_data);
+                inner.free_blocks_count -= 1;
+                return result.map(|n| n + (i * ext4_block_size * 8));
             }
         }
-        return None;
+        None
     }
 
-    /// 上层调用者需要转换为文件系统的全局块号(block_num + block_group_num * blocks_per_group)
     pub fn alloc_block(
         &self,
         block_device: Arc<dyn BlockDevice>,
@@ -230,32 +203,33 @@ impl GroupDesc {
         let mut inner = self.inner.write();
         let mut result = Vec::new();
         let num_blocks = block_bitmap_size / ext4_block_size;
-        // let mut total_allocated = 0;
 
         for i in 0..num_blocks {
             if block_count == 0 {
                 break;
             }
-
             let block_id = self.block_bitmap as usize + i;
-            let block_cahce = get_block_cache(block_id, block_device.clone(), ext4_block_size);
-            let mut block_cache_guard = block_cahce.lock();
-            let mut bitmap = Ext4Bitmap::new(block_cache_guard.get_mut(0));
+            let mut block_data = read_ext4_block(&block_device, block_id);
+            let mut bitmap = Ext4Bitmap::new(&mut block_data);
+            let mut modified = false;
 
             while block_count > 0 {
-                if let Some((local_block_start, allocated)) =
+                if let Some((local_start, allocated)) =
                     bitmap.alloc_contiguous(block_bitmap_size, block_count)
                 {
                     inner.free_blocks_count -= allocated as u32;
-                    let global_block_start = local_block_start + (i * ext4_block_size * 8);
-                    result.push((global_block_start, allocated));
+                    let global_start = local_start + (i * ext4_block_size * 8);
+                    result.push((global_start, allocated));
                     block_count -= allocated as usize;
+                    modified = true;
                 } else {
                     break;
                 }
             }
+            if modified {
+                write_ext4_block(&block_device, block_id, &block_data);
+            }
         }
-
         result
     }
 
@@ -268,17 +242,15 @@ impl GroupDesc {
         block_bitmap_size: usize,
     ) {
         let mut inner = self.inner.write();
-        let block_id = self.block_bitmap as usize + local_block_num / (ext4_block_size * 8);
+        let block_id =
+            self.block_bitmap as usize + local_block_num / (ext4_block_size * 8);
         let block_offset = local_block_num % (ext4_block_size * 8);
-        Ext4Bitmap::new(
-            get_block_cache(block_id, block_device.clone(), ext4_block_size)
-                .lock()
-                .get_mut(0),
-        )
-        .dealloc_contiguous(block_offset, block_count, block_bitmap_size);
+        let mut block_data = read_ext4_block(&block_device, block_id);
+        Ext4Bitmap::new(&mut block_data)
+            .dealloc_contiguous(block_offset, block_count, block_bitmap_size);
+        write_ext4_block(&block_device, block_id, &block_data);
         inner.free_blocks_count += block_count as u32;
     }
-    */
 }
 
 #[allow(dead_code)]
