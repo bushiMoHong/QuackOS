@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="EMPTY_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/kernel/arch/aarch64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/arch/loongarch64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/arch/riscv64/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/kernel/common/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/kernel/target" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

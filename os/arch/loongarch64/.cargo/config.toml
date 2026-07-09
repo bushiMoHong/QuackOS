@@ -1,0 +1,8 @@
+[build]
+target = "loongarch64-unknown-none"
+
+[target.loongarch64-unknown-none]
+rustflags = ["-Cforce-frame-pointers=yes"]
+
+[source.crates-io]
+replace-with = "vendored-sources"

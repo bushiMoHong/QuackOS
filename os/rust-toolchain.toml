@@ -1,0 +1,3 @@
+[toolchain]
+channel = "stable"
+targets = ["aarch64-unknown-none", "riscv64gc-unknown-none-elf", "loongarch64-unknown-none"]

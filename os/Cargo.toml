@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "common",
+    "arch/aarch64",
+    # "arch/riscv64",    # TODO: missing deps (spin, log, virtio_drivers, zerocopy)
+    # "arch/loongarch64",# TODO: missing deps
+]
+resolver = "2"
+
+[profile.dev]
+opt-level = 1
+panic = "abort"
+
+[profile.release]
+opt-level = 3
+panic = "abort"
