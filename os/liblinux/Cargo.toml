@@ -1,0 +1,13 @@
+[package]
+name = "liblinux"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone user-space crate — not part of the kernel workspace.
+# Built separately by the Makefile before the kernel.
+
+[workspace]
+
+[[bin]]
+name = "liblinux"
+path = "src/main.rs"
