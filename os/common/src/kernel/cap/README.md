@@ -133,3 +133,47 @@ pub fn check_send_right(sender_pid: ProcessId, channel_id: ChannelId) -> Result<
         当用户态想要创建一个新线程时，它必须调用 allocator.rs 提供的系统调用，把一块 Untyped 能力拆碎，“重塑（Retype）”成一个 Thread 能力。
 
         这样，内核里对象的生死和数量，完全由用户态消耗自己的物理内存资产来决定，内核只做账目记录。
+
+## 不足
+
+   ### 一、 当前 cap 模块如何解决 TaskStruct 存放在用户空间的难题？
+
+      1.解决“容易被应用程序篡改（安全性挑战）”
+
+         - 机制：LibOS 的伪造是无效的，因为微内核只认 CSpace。根据你的 cspace.rs 设计，sys_ipc_send 会调用 cap::cspace::lookup_send_right(sender_pid, channel_id)。  
+         - 效果：无论 bash 怎么篡改它内存里的 TaskStruct，当它尝试发 IPC 消息给 FsServer 时，微内核只会在该进程的 CNode 表里查找是否有对应 ChannelId 的 Capability 且包含 SEND 权限。用户态无法伪造内核里的 CSpace 表。  
+
+      2.解决“全局状态同步极其困难（如 fork 共享 fd）”
+
+         - 机制：利用 derive.rs 中的能力派生链。
+         - 效果：当 LibOS 执行 fork 时，它可以调用 derive_cap 将父进程 CSpace 中的 Endpoint 能力派生给子进程。父子进程通过各自的 CPtr 访问同一个底层的 Channel，FsServer 端收到的消息都指向同一个内部文件对象，从而天然实现了文件偏移量（offset）的同步。  
+
+      3.解决“ProcServer 的设计压力倍增”
+
+         - 机制：利用 derive.rs 中的 revoke 机制。
+         - 效果：当父进程想要强制杀死子进程，或者回收资源时，只需要调用 revoke。由于 DERIVE_TABLE 维护了派生树，所有子进程通过该能力派生出的通信通道或内存访问权都会被瞬间切断，极大简化了 ProcServer 的回收逻辑。  
+
+   ### 二、 为了跑通 LibOS，还需要增加哪些额外功能？
+
+      虽然基础非常扎实，但目前的 cap 模块还有一些为了初期快速开发而留的“占位符 (placeholder)”，你需要补齐以下几块拼图：
+
+      1. 突破单层 CNode 的容量限制（极其关键）
+
+         - 现状：在 cspace.rs 中，目前采用的是单层平铺的 CNode，且 CSLOT_COUNT = 64。  
+         - 问题：一个真实的 Linux 进程（如 Bash）不仅需要打开三个标准输入输出，还会打开几十个甚至上百个文件、动态库映射、网络 Socket 等。64 个槽位 会被瞬间耗尽。  
+         - 额外需求：就像你的注释里提到的，必须升级为 多级 CSpace (multi-level CSpace)。或者，在早期阶段，至少把 CSLOT_COUNT 扩大到 1024 左右，暂时使用动态数组（alloc::vec::Vec）而非固定大小的栈上数组，以防内核栈溢出。  
+
+      2. IPC 传递 Capability（能力授予）
+         - 现状：你在 CapRights 中定义了 GRANT 权限（允许转让给其他进程）。  
+         - 问题：目前没有看到 IPC 模块和 cap 模块联动实现“在发送 IPC 消息时，附带转移/复制一个 CPtr”的代码。
+         - 额外需求：在 FsServer 执行 open("/etc/passwd") 成功后，FsServer 需要通过 IPC 把一个新的 Endpoint（代表这个打开的文件）传给 LibOS。微内核必须能够拦截这种特殊的 IPC 消息，在接收方进程的 CSpace 里 insert_cap，并把新的 CPtr 告诉接收方。  
+
+      3. 实现 Untyped 内存的 Retype (动态创建内核对象)
+         - 现状：你的 allocator.rs 中，retype 函数目前只是一个返回 Err(RetypeError::NotUntyped) 的占位符。  
+         - 问题：在纯微内核中，LibOS 想要创建一个新线程或新的 IPC Channel 时，必须消耗自己的 Untyped 内存。目前由于 retype 没有实现，LibOS 无法动态向内核申请创建新资源。
+         - 额外需求：需要补齐物理内存管理（bmm），让 retype 真正能够切分 Untyped 内存并生成 CapType::Thread 或 CapType::Endpoint。  
+
+      4. 僵尸对象与引用计数（死亡通知）
+         - 现状：当进程退出调用 destroy_cspace 时，内核只是删除了这个进程的账本。  
+         - 问题：FsServer 怎么知道某个 LibOS 已经崩溃或退出了？如果不通知，FsServer 里维护的底层文件状态就会内存泄漏。
+         - 额外需求：需要增加一种机制——当某个 Channel 或内核对象的所有 Capability 引用都被释放时，微内核能够自动给该对象的拥有者（如 FsServer）发送一条特殊的 IPC 死亡通知（Death Notification）。你的枚举里已经预留了 CapType::Notification，后续可以用它来实现异步事件通知。  

@@ -5,7 +5,6 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::any::Any;
 
-use super::block_op::EXT4_BLOCK_SIZE;
 use super::dentry::{EXT4_DT_DIR, EXT4_DT_LNK, EXT4_DT_REG};
 use super::inode::{
     load_inode, write_inode, Ext4Inode, Ext4InodeDisk, EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL,

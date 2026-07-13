@@ -9,3 +9,5 @@ log = "0.4"
 hashbrown = "0.14"
 linked_list_allocator = "0.10"
 aarch64 = { path = "../arch/aarch64" }
+virtio-drivers = "0.7"
+xmas-elf = { version = "0.10.0", default-features = false }

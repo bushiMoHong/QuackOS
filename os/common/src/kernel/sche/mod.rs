@@ -66,7 +66,7 @@ pub mod thread;
 pub use context::{block_current, bootstrap_idle, current_thread, schedule, wake};
 pub use error::ScheError;
 pub use queue::{dequeue_ready, enqueue_ready, is_ready_empty, runnable_count, DEFAULT_PRIORITY, MAX_PRIORITY, NUM_PRIORITIES};
-pub use thread::{create_thread, destroy_thread, thread_count, thread_exists, with_thread, with_thread_mut, kernel_stack_top, Thread, ThreadId, ThreadState};
+pub use thread::{create_thread, destroy_thread, thread_count, thread_exists, with_thread, with_thread_mut, kernel_stack_top, set_kernel_stack_top, tcb_ptr, Thread, ThreadId, ThreadState};
 
 // Re-export IpcState from IPC so the sche module can use it without
 // circular dependency — sche::IpcState is the canonical name.
@@ -80,9 +80,9 @@ pub use crate::kernel::ipc::synchronization::IpcState;
 ///
 /// # What it does
 ///
-/// 1. Logs initialisation.
-/// 2. (Future) Initialises per-CPU data structures for SMP.
-/// 3. (Future) Creates the idle thread.
+/// 1. Creates a TCB for the boot thread so it can participate in scheduling.
+/// 2. Bootstraps the boot thread as current.
+/// 3. Sets x19 to point to the boot thread's TCB (required by `__switch`).
 ///
 /// Must be called once during kernel boot, before any thread operations.
 pub fn init() {
@@ -90,4 +90,29 @@ pub fn init() {
         NUM_PRIORITIES,
         thread::MAX_THREADS,
     );
+
+    // Create a boot thread TCB so the boot thread can block on IPC, etc.
+    //
+    // The boot thread already has a kernel stack (set up by boot assembly).
+    // We allocate a small stack area for TCB tracking purposes — the actual
+    // stack pointer is saved/restored by __switch automatically.
+    let boot_stack_pa = aarch64::base::mm::alloc_page().expect("OOM for boot TCB stack");
+    let boot_stack_top = boot_stack_pa + aarch64::base::config::PAGE_SIZE;
+
+    let tid = unsafe {
+        thread::create_thread(
+            128,        // default priority
+            boot_stack_pa,
+            boot_stack_top,
+            0,          // ttbr0
+            0,          // asid
+        )
+    }.expect("Failed to create boot thread TCB");
+
+    unsafe {
+        bootstrap_idle(tid);
+        // Set x19 to point to the boot thread's TCB.
+        let tcb = thread::tcb_ptr(tid);
+        core::arch::asm!("mov x19, {}", in(reg) tcb);
+    }
 }

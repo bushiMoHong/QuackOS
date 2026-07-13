@@ -17,3 +17,5 @@ pub mod fs;
 pub mod mm;
 pub mod task;
 pub mod proc;
+pub mod drivers;
+pub mod init;

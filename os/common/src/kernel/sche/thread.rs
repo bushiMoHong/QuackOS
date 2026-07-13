@@ -177,6 +177,12 @@ pub struct Thread {
     pub ipc_state: IpcState,
     /// Per-thread IPC receive buffer (moved from `ipc::transfer` global table).
     pub ipc_buffer: IpcBuffer,
+
+    // ── Linux syscall exception reflection ──
+    /// User-mode liblinux handler entry point for this thread (per-thread, §8.7).
+    pub linux_handler_pc: Option<usize>,
+    /// Per-thread save area vaddr for `LinuxContext` (§8.4).
+    pub linux_save_area: Option<usize>,
 }
 
 impl Thread {
@@ -207,6 +213,8 @@ impl Thread {
             state: AtomicU8::new(ThreadState::Ready as u8),
             ipc_state: IpcState::Ready,
             ipc_buffer: IpcBuffer::empty(),
+            linux_handler_pc: None,
+            linux_save_area: None,
         }
     }
 
@@ -473,4 +481,31 @@ pub fn kernel_stack_top(id: ThreadId) -> usize {
         .lookup(id)
         .expect("sche: kernel_stack_top on invalid thread")
         .kernel_stack_top
+}
+
+/// Return a raw pointer to the TCB identified by `id`.
+///
+/// The pointer is valid as long as the thread is not destroyed. It is used
+/// to initialise x19 in the saved `TaskContext` of a newly-created thread
+/// so that `__switch` can write the kernel SP into `TCB[0]`.
+///
+/// # Safety
+///
+/// The returned pointer becomes dangling if the thread is destroyed.
+/// Callers must ensure the thread outlives the pointer.
+pub unsafe fn tcb_ptr(id: ThreadId) -> *const Thread {
+    let table = THREAD_TABLE.lock();
+    let thread = table
+        .lookup(id)
+        .expect("sche: tcb_ptr on invalid thread");
+    (thread as *const Thread)
+}
+
+/// Update the kernel stack top field after modifying the stack layout.
+pub fn set_kernel_stack_top(id: ThreadId, top: usize) {
+    let mut table = THREAD_TABLE.lock();
+    let thread = table
+        .lookup_mut(id)
+        .expect("sche: set_kernel_stack_top on invalid thread");
+    thread.kernel_stack_top = top;
 }

@@ -110,15 +110,11 @@ impl VirtAddr {
         self.0 & (PAGE_SIZE - 1)
     }
 
-    /// Convert to physical address via linear mapping (identity minus PAGE_OFFSET).
+    /// Convert to physical address via identity mapping.
     ///
-    /// Only valid for addresses in the direct-mapped kernel region.
+    /// With identity mapping enabled, virt == phys for all kernel addresses.
     pub fn to_phys(&self) -> Option<PhysAddr> {
-        if self.0 >= PAGE_OFFSET {
-            Some(PhysAddr(self.0 - PAGE_OFFSET))
-        } else {
-            None
-        }
+        Some(PhysAddr(self.0))
     }
 }
 
@@ -141,9 +137,9 @@ impl PhysPageNum {
 }
 
 impl PhysAddr {
-    /// Convert to kernel virtual address via linear mapping.
+    /// Convert to kernel virtual address via identity mapping.
     pub fn to_kernel_virt(&self) -> VirtAddr {
-        VirtAddr(self.0 + PAGE_OFFSET)
+        VirtAddr(self.0)
     }
 
     /// Return a mutable reference to the page-sized array of PTE descriptors.
@@ -218,10 +214,11 @@ pub mod pte {
     pub const MAIR_NORMAL_WB: usize     = 2 << 2;
 
     // Access permissions (AP, bits [7:6])
-    pub const AP_EL0_RW_EL1_RW: usize = 0b00 << 6;  // RW at all levels
-    pub const AP_EL0_RW_EL1_RW_ALT: usize = 0b01 << 6;
-    pub const AP_EL0_RO_EL1_RW: usize = 0b10 << 6;  // EL0 read-only
-    pub const AP_EL0_NO_EL1_RW: usize = 0b11 << 6;  // EL0 no access
+    // AP[1] (bit 6) = 1 → EL0 can access; AP[2] (bit 7) = 1 → read-only
+    pub const AP_EL1_RW_EL0_NO: usize  = 0b00 << 6;  // EL1 RW, EL0 no access
+    pub const AP_EL0_RW_EL1_RW: usize  = 0b01 << 6;  // EL0 RW, EL1 RW
+    pub const AP_EL1_RO_EL0_NO: usize  = 0b10 << 6;  // EL1 RO, EL0 no access
+    pub const AP_EL0_RO_EL1_RO: usize  = 0b11 << 6;  // EL0 RO, EL1 RO
 
     // Shareability (SH, bits [9:8])
     pub const SH_NON_SHAREABLE: usize = 0b00 << 8;
@@ -267,7 +264,7 @@ pub mod pte {
         let mut desc = (output_ppn << 12) | AF;
         desc |= MAIR_NORMAL_WB;
         desc |= SH_INNER_SHAREABLE;
-        desc |= AP_EL0_NO_EL1_RW; // kernel-only
+        desc |= AP_EL1_RW_EL0_NO; // kernel-only
         desc |= UXN | PXN;        // non-executable by default
         if is_page {
             desc |= DESC_PAGE;

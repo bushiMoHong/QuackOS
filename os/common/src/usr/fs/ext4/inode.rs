@@ -121,15 +121,17 @@ pub(crate) fn write_block(device: &Arc<dyn BlockDevice>, block_num: usize, data:
 }
 
 /// Read a full ext4 block into a fixed-size array.
-pub(crate) fn read_ext4_block(device: &Arc<dyn BlockDevice>, block_num: usize) -> [u8; FS_BLOCK_SIZE] {
+pub(crate) fn read_ext4_block(device: &Arc<dyn BlockDevice>, block_num: usize, block_size: usize) -> [u8; FS_BLOCK_SIZE] {
     let mut buf = [0u8; FS_BLOCK_SIZE];
-    device.read(block_num * FS_BLOCK_SIZE, &mut buf);
+    device.read(block_num * block_size, &mut buf);
     buf
 }
 
-/// Write a full ext4 block from a fixed-size array.
-pub(crate) fn write_ext4_block(device: &Arc<dyn BlockDevice>, block_num: usize, data: &[u8; FS_BLOCK_SIZE]) {
-    device.write(block_num * FS_BLOCK_SIZE, data);
+/// Write an ext4 metadata block.  Only `block_size` bytes are written so that
+/// adjacent blocks are not corrupted when the filesystem block size is smaller
+/// than FS_BLOCK_SIZE (4096).
+pub(crate) fn write_ext4_block(device: &Arc<dyn BlockDevice>, block_num: usize, data: &[u8], block_size: usize) {
+    device.write(block_num * block_size, &data[..block_size]);
 }
 
 // ---------------------------------------------------------------------------
@@ -472,8 +474,7 @@ impl Ext4InodeDisk {
             let extent_idxs = self.extent_idxs(&extent_header);
             if let Some(idx) = extent_idxs.iter().find(|idx| idx.block <= current_block) {
                 let child_block_num = idx.physical_leaf_block();
-                // TODO: use BlockCache for recursive lookup
-                let mut block_data = read_ext4_block(&block_device, child_block_num);
+                let mut block_data = read_ext4_block(&block_device, child_block_num, ext4_block_size);
                 return Ext4ExtentBlock::new(&mut block_data)
                     .lookup_extent(logical_start_block, block_device, ext4_block_size);
             } else {
@@ -504,9 +505,9 @@ impl Ext4InodeDisk {
         if header.depth > 0 {
             for idx in self.extent_idxs(&header) {
                 let child_block = idx.physical_leaf_block();
-                let mut block_data = read_ext4_block(&block_device, child_block);
+                let mut block_data = read_ext4_block(&block_device, child_block, ext4_block_size);
                 let mut child_node = Ext4ExtentBlock::new(&mut block_data);
-                child_node.iter_all_extents(block_device.clone(), result);
+                child_node.iter_all_extents(block_device.clone(), ext4_block_size, result);
             }
         } else {
             result.extend(self.extents(&header).iter().cloned());
@@ -568,8 +569,7 @@ impl Ext4InodeDisk {
                 .find(|idx| idx.block <= logical_block_num)
             {
                 let child_block_num = idx.physical_leaf_block();
-                // TODO: use BlockCache
-                let mut block_data = read_ext4_block(&block_device, child_block_num);
+                let mut block_data = read_ext4_block(&block_device, child_block_num, ext4_block_size);
                 return Ext4ExtentBlock::new(&mut block_data)
                     .insert_extent(logical_block_num, physical_block_num, blocks_count);
             } else {
@@ -604,7 +604,7 @@ impl Ext4InodeDisk {
                 .find(|idx| idx.block <= logical_block_num)
             {
                 let child_block_num = idx.physical_leaf_block();
-                let mut block_data = read_ext4_block(&block_device, child_block_num);
+                let mut block_data = read_ext4_block(&block_device, child_block_num, ext4_block_size);
                 return Ext4ExtentBlock::new(&mut block_data)
                     .insert_extent(logical_block_num, physical_block_num, blocks_count);
             } else {
@@ -651,15 +651,13 @@ impl Ext4InodeDisk {
         let left_logical_start_block = left[0].logical_block;
         let right_logical_start_block = right[0].logical_block;
 
-        // Initialize left Ext4ExtentBlock
-        let mut left_data = read_ext4_block(&block_device, new_left_block_num);
+        let mut left_data = read_ext4_block(&block_device, new_left_block_num, ext4_block_size);
         Ext4ExtentBlock::new(&mut left_data).init_as_leaf(&left);
-        write_ext4_block(&block_device, new_left_block_num, &left_data);
+        write_ext4_block(&block_device, new_left_block_num, &left_data, ext4_block_size);
 
-        // Initialize right Ext4ExtentBlock
-        let mut right_data = read_ext4_block(&block_device, new_right_block_num);
+        let mut right_data = read_ext4_block(&block_device, new_right_block_num, ext4_block_size);
         Ext4ExtentBlock::new(&mut right_data).init_as_leaf(&right);
-        write_ext4_block(&block_device, new_right_block_num, &right_data);
+        write_ext4_block(&block_device, new_right_block_num, &right_data, ext4_block_size);
 
         extent_header.entries = 2;
         extent_header.depth += 1;
@@ -773,10 +771,14 @@ fn new_page_cache(
     page_index: usize,
     fs_block_id: usize,
     block_device: &Arc<dyn BlockDevice>,
+    block_size: usize,
 ) -> Arc<Mutex<Page>> {
     let mut page = Page::new(page_index);
     if fs_block_id != MAX_FS_BLOCK_ID && (fs_block_id & MAX_FS_BLOCK_ID) != MAX_FS_BLOCK_ID {
-        block_device.read(fs_block_id * FS_BLOCK_SIZE, &mut page.data);
+        // Read PAGE_SIZE bytes starting at the filesystem-block-aligned offset.
+        // When block_size < PAGE_SIZE this reads several contiguous fs blocks,
+        // which is fine for sequentially-allocated extents.
+        block_device.read(fs_block_id * block_size, &mut page.data);
     }
     let page = Arc::new(Mutex::new(page));
     address_space.insert_page(page.clone());
@@ -873,6 +875,9 @@ impl Ext4Inode {
             return Ok(0);
         }
 
+        let block_size = self.get_block_size();
+        let fs_blocks_per_page = PAGE_SIZE / block_size;
+
         let mut current_read = 0;
         let mut page_index = offset >> PAGE_SIZE_BITS;
         let mut page_offset_in_page = offset & (PAGE_SIZE - 1);
@@ -899,18 +904,19 @@ impl Ext4Inode {
                 );
                 return Ok(copy_len);
             } else {
+                let logical_block = page_index as u32 * fs_blocks_per_page as u32;
                 if let Some(extent) = &current_extent {
-                    if (extent.logical_block + extent.len as u32) as usize > page_index {
-                        fs_block_id = extent.physical_start_block() + page_index
+                    if (extent.logical_block + extent.len as u32) > logical_block {
+                        fs_block_id = extent.physical_start_block() + logical_block as usize
                             - extent.logical_block as usize;
                     } else {
                         let extent = self.inner.write().inode_on_disk.lookup_extent(
-                            page_index as u32,
+                            logical_block,
                             self.block_device.clone(),
-                            self.ext4_fs.upgrade().unwrap().block_size(),
+                            block_size,
                         );
                         if let Some(extent) = extent {
-                            fs_block_id = extent.physical_start_block() + page_index
+                            fs_block_id = extent.physical_start_block() + logical_block as usize
                                 - extent.logical_block as usize;
                             current_extent = Some(extent);
                         } else {
@@ -920,12 +926,12 @@ impl Ext4Inode {
                     }
                 } else {
                     let extent = self.inner.write().inode_on_disk.lookup_extent(
-                        page_index as u32,
+                        logical_block,
                         self.block_device.clone(),
-                        self.ext4_fs.upgrade().unwrap().block_size(),
+                        block_size,
                     );
                     if let Some(extent) = extent {
-                        fs_block_id = extent.physical_start_block() + page_index
+                        fs_block_id = extent.physical_start_block() + logical_block as usize
                             - extent.logical_block as usize;
                         current_extent = Some(extent);
                     } else {
@@ -938,6 +944,7 @@ impl Ext4Inode {
                     page_index,
                     fs_block_id,
                     &self.block_device,
+                    block_size,
                 );
             }
             let remaining_file_size = inode_size - (current_read + offset);
@@ -965,6 +972,8 @@ impl Ext4Inode {
             return None;
         }
 
+        let block_size = self.get_block_size();
+        let fs_blocks_per_page = PAGE_SIZE / block_size;
         let mut address_space = self.address_space.lock();
 
         address_space.get_page_cache(page_index).or_else(|| {
@@ -977,18 +986,20 @@ impl Ext4Inode {
                 );
                 return Some(page);
             }
+            let logical_block = page_index as u32 * fs_blocks_per_page as u32;
             let extent = self.lookup_or_create_extent(
-                page_index as u32,
+                logical_block,
                 self.block_device.clone(),
-                self.ext4_fs.upgrade().unwrap().block_size(),
+                block_size,
             );
             let fs_block_id =
-                extent.physical_start_block() + page_index - extent.logical_block as usize;
+                extent.physical_start_block() + logical_block as usize - extent.logical_block as usize;
             Some(new_page_cache(
                 &mut address_space,
                 page_index,
                 fs_block_id,
                 &self.block_device,
+                block_size,
             ))
         })
     }
@@ -998,6 +1009,8 @@ impl Ext4Inode {
         let last_page = inode_size >> PAGE_SIZE_BITS;
         let mut pages = Vec::with_capacity(page_count);
 
+        let block_size = self.get_block_size();
+        let fs_blocks_per_page = PAGE_SIZE / block_size;
         let mut cached_extent: Option<Ext4Extent> = None;
         let mut address_space = self.address_space.lock();
 
@@ -1018,18 +1031,19 @@ impl Ext4Inode {
                     ));
                 }
 
+                let logical_block = idx as u32 * fs_blocks_per_page as u32;
                 let extent = match &cached_extent {
                     Some(ext)
-                        if (idx as u32) >= ext.logical_block
-                            && (idx as u32) < ext.logical_block + ext.len as u32 =>
+                        if logical_block >= ext.logical_block
+                            && logical_block < ext.logical_block + ext.len as u32 =>
                     {
                         ext.clone()
                     }
                     _ => {
                         let new_extent = self.lookup_or_create_extent(
-                            idx as u32,
+                            logical_block,
                             self.block_device.clone(),
-                            self.ext4_fs.upgrade().unwrap().block_size(),
+                            block_size,
                         );
                         cached_extent = Some(new_extent.clone());
                         new_extent
@@ -1037,12 +1051,13 @@ impl Ext4Inode {
                 };
 
                 let fs_block_id =
-                    extent.physical_start_block() + idx - extent.logical_block as usize;
+                    extent.physical_start_block() + logical_block as usize - extent.logical_block as usize;
                 Some(new_page_cache(
                     &mut address_space,
                     idx,
                     fs_block_id,
                     &self.block_device,
+                    block_size,
                 ))
             });
 
@@ -1131,6 +1146,8 @@ impl Ext4Inode {
         let mut page_offset = offset >> PAGE_SIZE_BITS;
         let mut page_offset_in_page = offset & (PAGE_SIZE - 1);
 
+        let block_size = self.get_block_size();
+        let fs_blocks_per_page = PAGE_SIZE / block_size;
         let mut current_extent: Option<Ext4Extent> = None;
         let mut page: Arc<Mutex<Page>>;
         let mut fs_block_id: usize;
@@ -1140,28 +1157,29 @@ impl Ext4Inode {
             if let Some(page_cache) = address_space.get_page_cache(page_offset) {
                 page = page_cache;
             } else {
+                let logical_block = page_offset as u32 * fs_blocks_per_page as u32;
                 if let Some(extent) = &current_extent {
-                    if (extent.logical_block + extent.len as u32) as usize > page_offset {
-                        fs_block_id = extent.physical_start_block() + page_offset
+                    if (extent.logical_block + extent.len as u32) > logical_block {
+                        fs_block_id = extent.physical_start_block() + logical_block as usize
                             - extent.logical_block as usize;
                     } else {
                         let extent = self.lookup_or_create_extent(
-                            page_offset as u32,
+                            logical_block,
                             self.block_device.clone(),
-                            self.ext4_fs.upgrade().unwrap().block_size(),
+                            block_size,
                         );
-                        fs_block_id = extent.physical_start_block() + page_offset
+                        fs_block_id = extent.physical_start_block() + logical_block as usize
                             - extent.logical_block as usize;
                         current_extent = Some(extent);
                     }
                 } else {
                     let extent = self.lookup_or_create_extent(
-                        page_offset as u32,
+                        logical_block,
                         self.block_device.clone(),
-                        self.ext4_fs.upgrade().unwrap().block_size(),
+                        block_size,
                     );
                     fs_block_id =
-                        extent.physical_start_block() + page_offset - extent.logical_block as usize;
+                        extent.physical_start_block() + logical_block as usize - extent.logical_block as usize;
                     current_extent = Some(extent);
                 }
                 page = new_page_cache(
@@ -1169,6 +1187,7 @@ impl Ext4Inode {
                     page_offset,
                     fs_block_id,
                     &self.block_device,
+                    block_size,
                 );
             }
             let copy_len = (wbuf_len - current_write).min(PAGE_SIZE - page_offset_in_page);
@@ -1238,13 +1257,13 @@ impl Ext4Inode {
 
             let mut block_buf = [0u8; PAGE_SIZE];
             if copy_len != PAGE_SIZE || offset_in_page != 0 {
-                self.block_device.read(fs_block_id * FS_BLOCK_SIZE, &mut block_buf);
+                self.block_device.read(fs_block_id * block_size, &mut block_buf);
             }
 
             block_buf[offset_in_page..offset_in_page + copy_len]
                 .copy_from_slice(&buf[current_write..current_write + copy_len]);
 
-            self.block_device.write(fs_block_id * FS_BLOCK_SIZE, &block_buf);
+            self.block_device.write(fs_block_id * block_size, &block_buf);
 
             current_write += copy_len;
             page_offset += 1;
@@ -1332,6 +1351,7 @@ impl Ext4Inode {
                         0,
                         new_block,
                         &self.block_device,
+                        self.get_block_size(),
                     );
                     let inline_page_guard = inline_page.lock();
                     let inline_data: &[u8; EXT4_MAX_INLINE_DATA] = inline_page_guard.get_ref(0);
@@ -1389,6 +1409,7 @@ impl Ext4Inode {
                         0,
                         new_block,
                         &self.block_device,
+                        self.get_block_size(),
                     );
                     let inline_page_guard = inline_page.lock();
                     let inline_data: &[u8; EXT4_MAX_INLINE_DATA] = inline_page_guard.get_ref(0);
@@ -1714,7 +1735,7 @@ impl Ext4Inode {
                     let phsical_block_id = extent.physical_start_block() + block_num as usize
                         - extent.logical_block as usize;
                     self.block_device
-                        .write(phsical_block_id * FS_BLOCK_SIZE, &[0u8; PAGE_SIZE]);
+                        .write(phsical_block_id * block_size as usize, &[0u8; PAGE_SIZE]);
                     self.ext4_fs.upgrade().unwrap().dealloc_block(
                         self.block_device.clone(),
                         phsical_block_id,

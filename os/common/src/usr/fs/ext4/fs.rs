@@ -1,4 +1,6 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::vec;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use crate::usr::fs::dev::block_dev::BlockDevice;
 use super::block_group::{self, Ext4GroupDescDisk, GroupDesc};
@@ -47,8 +49,10 @@ impl Ext4FileSystem {
         let mut block_groups: Vec<Arc<GroupDesc>> = Vec::new();
         let block_group_count = super_block.block_group_count as usize;
 
-        debug_assert!(block_group_count * core::mem::size_of::<GroupDesc>() < EXT4_BLOCK_SIZE);
-        let bg_data = read_block(&block_device, 1, EXT4_BLOCK_SIZE);
+        let block_size = super_block.block_size as usize;
+        let gdt_block = (EXT4_SUPERBLOCK_OFFSET / block_size) + 1;
+        debug_assert!(block_group_count * core::mem::size_of::<Ext4GroupDescDisk>() <= block_size);
+        let bg_data = read_block(&block_device, gdt_block, block_size);
         for i in 0..block_group_count {
             let offset = i * core::mem::size_of::<Ext4GroupDescDisk>();
             let group_desc: &Ext4GroupDescDisk =
@@ -108,19 +112,19 @@ impl Ext4FileSystem {
 
     pub fn alloc_one_block(&self, block_device: Arc<dyn BlockDevice>) -> usize {
         let block_bitmap_size = self.super_block.blocks_per_group as usize / 8;
+        let bs = self.block_size();
         for (i, group) in self.block_groups.iter().enumerate() {
             if let Some(local_start) = group.alloc_one_block(
                 block_device.clone(),
-                self.block_size(),
+                bs,
                 block_bitmap_size,
             ) {
                 self.super_block.inner.write().free_blocks_count -= 1;
                 let global_start =
                     local_start + self.super_block.blocks_per_group as usize * i;
-                // Zero out the newly allocated block
-                let zeroes = [0u8; EXT4_BLOCK_SIZE];
+                let zeroes = vec![0u8; bs];
                 self.block_device
-                    .write(global_start * EXT4_BLOCK_SIZE, &zeroes);
+                    .write(global_start * bs, &zeroes);
                 return global_start;
             }
         }
@@ -133,6 +137,7 @@ impl Ext4FileSystem {
         block_count: usize,
     ) -> Vec<(usize, u32)> {
         let block_bitmap_size = self.super_block.blocks_per_group as usize / 8;
+        let bs = self.block_size();
         let mut result = Vec::new();
         let mut remaining = block_count;
 
@@ -142,7 +147,7 @@ impl Ext4FileSystem {
             }
             let allocated = group.alloc_block(
                 block_device.clone(),
-                self.block_size(),
+                bs,
                 block_bitmap_size,
                 remaining,
             );
@@ -152,11 +157,10 @@ impl Ext4FileSystem {
                 result.push((global_start, count));
                 remaining -= count as usize;
                 self.super_block.inner.write().free_blocks_count -= count as u64;
-                // Zero out allocated blocks
-                let zeroes = [0u8; EXT4_BLOCK_SIZE];
+                let zeroes = vec![0u8; bs];
                 for off in 0..count as usize {
                     self.block_device
-                        .write((global_start + off) * EXT4_BLOCK_SIZE, &zeroes);
+                        .write((global_start + off) * bs, &zeroes);
                 }
                 if remaining == 0 {
                     break;

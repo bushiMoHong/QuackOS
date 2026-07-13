@@ -78,6 +78,7 @@
 pub mod proc_table;
 pub mod server;
 pub mod types;
+pub mod elf_loader;
 
 // Re-export the public API surface.
 pub use proc_table::{ProcessInfo, ProcessTable, MAX_PROCESSES, MAX_THREADS_PER_PROCESS};

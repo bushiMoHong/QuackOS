@@ -5,7 +5,6 @@ use spin::RwLock;
 use crate::usr::fs::dev::block_dev::BlockDevice;
 use super::block_op::Ext4Bitmap;
 use super::inode::{read_ext4_block, write_ext4_block, Ext4InodeDisk};
-use super::block_op::EXT4_BLOCK_SIZE;
 
 #[derive(Debug, Clone)]
 #[repr(C)]
@@ -115,10 +114,10 @@ impl GroupDesc {
             let num_blocks = (inode_bitmap_size + ext4_block_size - 1) / ext4_block_size;
             for i in 0..num_blocks {
                 let block_id = self.inode_bitmap as usize + i;
-                let mut block_data = read_ext4_block(&block_device, block_id);
+                let mut block_data = read_ext4_block(&block_device, block_id, ext4_block_size);
                 let result = Ext4Bitmap::new(&mut block_data).alloc(inode_bitmap_size);
                 if result.is_some() {
-                    write_ext4_block(&block_device, block_id, &block_data);
+                    write_ext4_block(&block_device, block_id, &block_data, ext4_block_size);
                     inner.free_inodes_count -= 1;
                     if is_dir {
                         inner.used_dirs_count += 1;
@@ -144,7 +143,7 @@ impl GroupDesc {
         let table_block_id =
             self.inode_table as usize + local_inode_num * inode_size / ext4_block_size;
         let table_offset = local_inode_num * inode_size % ext4_block_size;
-        let mut table_data = read_ext4_block(&block_device, table_block_id);
+        let mut table_data = read_ext4_block(&block_device, table_block_id, ext4_block_size);
         unsafe {
             let inode_ptr =
                 table_data.as_mut_ptr().add(table_offset) as *mut Ext4InodeDisk;
@@ -153,15 +152,15 @@ impl GroupDesc {
             (*inode_ptr).set_mode(0);
             (*inode_ptr).clear_block();
         }
-        write_ext4_block(&block_device, table_block_id, &table_data);
+        write_ext4_block(&block_device, table_block_id, &table_data, ext4_block_size);
 
         // Free inode bitmap
         let bitmap_block_id =
             self.inode_bitmap as usize + local_inode_num / (ext4_block_size * 8);
         let bitmap_offset = local_inode_num % (ext4_block_size * 8);
-        let mut bitmap_data = read_ext4_block(&block_device, bitmap_block_id);
+        let mut bitmap_data = read_ext4_block(&block_device, bitmap_block_id, ext4_block_size);
         Ext4Bitmap::new(&mut bitmap_data).dealloc(bitmap_offset, block_bitmap_size);
-        write_ext4_block(&block_device, bitmap_block_id, &bitmap_data);
+        write_ext4_block(&block_device, bitmap_block_id, &bitmap_data, ext4_block_size);
 
         inner.free_inodes_count += 1;
         if is_dir {
@@ -182,10 +181,10 @@ impl GroupDesc {
         }
         for i in 0..num_blocks {
             let block_id = self.block_bitmap as usize + i;
-            let mut block_data = read_ext4_block(&block_device, block_id);
+            let mut block_data = read_ext4_block(&block_device, block_id, ext4_block_size);
             let result = Ext4Bitmap::new(&mut block_data).alloc(block_bitmap_size);
             if result.is_some() {
-                write_ext4_block(&block_device, block_id, &block_data);
+                write_ext4_block(&block_device, block_id, &block_data, ext4_block_size);
                 inner.free_blocks_count -= 1;
                 return result.map(|n| n + (i * ext4_block_size * 8));
             }
@@ -209,7 +208,7 @@ impl GroupDesc {
                 break;
             }
             let block_id = self.block_bitmap as usize + i;
-            let mut block_data = read_ext4_block(&block_device, block_id);
+            let mut block_data = read_ext4_block(&block_device, block_id, ext4_block_size);
             let mut bitmap = Ext4Bitmap::new(&mut block_data);
             let mut modified = false;
 
@@ -227,7 +226,7 @@ impl GroupDesc {
                 }
             }
             if modified {
-                write_ext4_block(&block_device, block_id, &block_data);
+                write_ext4_block(&block_device, block_id, &block_data, ext4_block_size);
             }
         }
         result
@@ -245,10 +244,10 @@ impl GroupDesc {
         let block_id =
             self.block_bitmap as usize + local_block_num / (ext4_block_size * 8);
         let block_offset = local_block_num % (ext4_block_size * 8);
-        let mut block_data = read_ext4_block(&block_device, block_id);
+        let mut block_data = read_ext4_block(&block_device, block_id, ext4_block_size);
         Ext4Bitmap::new(&mut block_data)
             .dealloc_contiguous(block_offset, block_count, block_bitmap_size);
-        write_ext4_block(&block_device, block_id, &block_data);
+        write_ext4_block(&block_device, block_id, &block_data, ext4_block_size);
         inner.free_blocks_count += block_count as u32;
     }
 }

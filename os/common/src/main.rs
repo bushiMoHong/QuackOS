@@ -7,7 +7,7 @@ use core::arch::global_asm;
 use core::panic::PanicInfo;
 use linked_list_allocator::LockedHeap;
 
-use kernel::trap::{self, TrapFrame, TrapHandler};
+use kernel::trap;
 
 pub mod kernel;
 pub mod usr;
@@ -18,7 +18,7 @@ global_asm!(include_str!("boot_arm64.S"));
 // Kernel heap — 256 KB static array
 // ---------------------------------------------------------------------------
 
-const HEAP_SIZE: usize = 256 * 1024;
+const HEAP_SIZE: usize = 8 * 1024 * 1024; // 8 MB — page cache needs ~4KB per cached page
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 #[global_allocator]
@@ -26,7 +26,7 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 const UART0_DR: *mut u8 = 0x09000000 as *mut u8;
 
-fn print_uart(s: &str) {
+pub fn print_uart(s: &str) {
     for byte in s.bytes() {
         unsafe {
             core::ptr::write_volatile(UART0_DR, byte);
@@ -34,7 +34,7 @@ fn print_uart(s: &str) {
     }
 }
 
-fn print_uart_hex(mut v: u64) {
+pub fn print_uart_hex(mut v: u64) {
     print_uart("0x");
     for i in 0..16 {
         let nibble = ((v >> (60 - i * 4)) & 0xF) as u8;
@@ -43,80 +43,167 @@ fn print_uart_hex(mut v: u64) {
     }
 }
 
+pub fn print_uart_num(n: usize) {
+    if n == 0 {
+        print_uart("0");
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut i = 0;
+    let mut v = n;
+    while v > 0 {
+        buf[i] = b'0' + (v % 10) as u8;
+        i += 1;
+        v /= 10;
+    }
+    while i > 0 {
+        i -= 1;
+        unsafe { core::ptr::write_volatile(UART0_DR, buf[i]) };
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Trap test infrastructure
+// Linker symbols
 // ---------------------------------------------------------------------------
 
-/// Static buffer for dumping registers after trap return.
-/// Layout: [x1, x2, x3, x4, x5, x6] — 6 slots
-static mut REG_DUMP: [u64; 6] = [0; 6];
+extern "C" {
+    static __bss_end: u8;
+}
 
-/// Trap handler used during the register save/restore test.
-struct TestHandler;
+// ---------------------------------------------------------------------------
+// MMU setup
+// ---------------------------------------------------------------------------
 
-impl TrapHandler for TestHandler {
-    fn handle_user_sync(_tf: &mut TrapFrame) {
-        print_uart("[FAIL] Unexpected user sync trap!\n");
+/// Physical address of the L0 page table, stored so init.rs can add user
+/// mappings into the same page table.
+pub(crate) static KERNEL_L0_PA: spin::Mutex<usize> = spin::Mutex::new(0);
+
+/// Physical address of the L2 table for VA sub-range 0x0–0x1FFFFF within
+/// L0[0]→L1[0], where user pages and MMIO blocks coexist.
+pub(crate) static KERNEL_L2_LOW_PA: spin::Mutex<usize> = spin::Mutex::new(0);
+
+/// Set up page tables and enable the MMU.
+///
+/// Page table structure (4KB granule, 48-bit VA):
+/// ```text
+/// L0[0] → L1
+///   L1[0] → L2 (VA 0x0–0x3FFF_FFFF)
+///     L2[0x48] = 2MB device block for UART  (VA 0x09000000)
+///     L2[0x50] = 2MB device block for virtio (VA 0x0A000000)
+///     (remaining L2 entries: free for user L3 tables)
+///   L1[1] = 1GB normal WB block for RAM (VA 0x40000000–0x7FFFFFFF)
+/// ```
+///
+/// After this call, virtual addresses == physical addresses for all kernel
+/// memory (identity mapped). User pages go into L0[0]→L1[0]'s unused L2 space.
+fn setup_mmu() {
+    use core::arch::asm;
+
+    print_uart("[MMU] setting up page tables...\n");
+
+    // Static BSS page tables — avoids allocator/memset issues.
+    #[repr(align(4096))]
+    struct PageTablePage([u64; 512]);
+
+    static mut L0: PageTablePage = PageTablePage([0u64; 512]);
+    static mut L1: PageTablePage = PageTablePage([0u64; 512]);
+    static mut L2_LO: PageTablePage = PageTablePage([0u64; 512]);
+
+    let l0 = unsafe { &raw mut L0.0 as *mut u64 };
+    let l1 = unsafe { &raw mut L1.0 as *mut u64 };
+    let l2_lo = unsafe { &raw mut L2_LO.0 as *mut u64 };
+    let l0_pa = l0 as usize;
+    let l1_pa = l1 as usize;
+    print_uart("[MMU] PT addrs: L0=");
+    print_uart_hex(l0_pa as u64);
+    print_uart(" L1=");
+    print_uart_hex(l1_pa as u64);
+    print_uart(" L2=");
+    print_uart_hex(l2_lo as usize as u64);
+    print_uart("\n");
+
+    // ---- L0[0] → L1 (VA 0x0–0x7F_FFFF_FFFF, 512GB) ----
+    // ---- L1[0] → L2_lo (VA 0x0–0x3FFF_FFFF, 1GB, MMIO + user pages) ----
+    // ---- L1[1] = 1GB RAM block (VA 0x40000000–0x7FFFFFFF) ----
+    unsafe {
+        l0.add(0).write_volatile((l1_pa as u64) | 0b11);
+        l1.add(0).write_volatile((l2_lo as usize as u64) | 0b11);
+        l1.add(1).write_volatile(
+            (0x40000000u64)
+                | (2 << 2)     // AttrIndx 2 = normal WB
+                | (1 << 5)     // NS = non-secure output address
+                | (0b11 << 8)  // inner shareable
+                | (0b00 << 6)  // AP = EL1 RW, EL0 RW
+                | (1 << 10)    // AF
+                | (1 << 54)    // UXN
+                // PXN = 0 — kernel code executable
+                | 0b01,        // block, valid (at L1)
+        );
+    }
+    print_uart("[MMU] L0/L1 entries written\n");
+
+    // ---- L2_lo: 2MB device blocks for UART + VirtIO ----
+    fn device_block(paddr: u64) -> u64 {
+        (paddr & 0x0000_FFFF_FFE0_0000)
+            | (0 << 2)     // AttrIndx 0 = device nGnRnE
+            | (1 << 5)     // NS = non-secure output address
+            | (0b11 << 8)  // inner shareable
+            | (0b00 << 6)  // AP = EL1 RW, EL0 RW
+            | (1 << 10)    // AF
+            | (1 << 54)    // UXN
+            | (1 << 53)    // PXN
+            | 0b01
+    }
+    unsafe {
+        l2_lo.add(0x48).write_volatile(device_block(0x09000000)); // UART
+        l2_lo.add(0x50).write_volatile(device_block(0x0A000000)); // VirtIO
+    }
+    print_uart("[MMU] device blocks written\n");
+
+    // ---- Store roots for init.rs ----
+    *KERNEL_L0_PA.lock() = l0_pa;
+    *KERNEL_L2_LOW_PA.lock() = l2_lo as usize;
+
+    // ---- Configure MAIR_EL1 ----
+    let mair: u64 =
+        0x00            // Attr0: Device-nGnRnE
+        | (0x44 << 8)   // Attr1: Normal, non-cacheable
+        | (0xFF << 16); // Attr2: Normal, WB, Read/Write Allocate
+    unsafe { asm!("msr mair_el1, {}", in(reg) mair); }
+
+    // ---- Configure TCR_EL1 ----
+    let tcr: u64 =
+        (16 << 0)      // T0SZ = 16 → 48-bit VA
+        | (16 << 16)   // T1SZ = 16
+        | (1 << 23)    // EPD1 = disable TTBR1 walks
+        | (0b00 << 14) // TG0 = 4KB granule
+        | (0b11 << 12) // SH0 = inner shareable
+        | (0b01 << 10) // ORGN0 = normal WB cacheable
+        | (0b01 << 8); // IRGN0 = normal WB cacheable
+    unsafe { asm!("msr tcr_el1, {}", in(reg) tcr); }
+
+    // ---- Set page table bases ----
+    unsafe {
+        asm!("msr ttbr0_el1, {}", in(reg) l0_pa);
+        asm!("msr ttbr1_el1, {}", in(reg) 0u64);
     }
 
-    fn handle_user_irq(_tf: &mut TrapFrame) {
-        // ignore for now
+    // ---- Synchronise & enable MMU ----
+    print_uart("[MMU] enabling MMU...\n");
+    unsafe { asm!("dsb ishst; tlbi vmalle1is; dsb ish; isb"); }
+    unsafe {
+        asm!(
+            "mrs x1, sctlr_el1",
+            "orr x1, x1, #1",
+            "msr sctlr_el1, x1",
+            "isb",
+            "mov w2, #77",
+            "strb w2, [x3]",
+            out("x1") _,
+            in("x3") 0x09000000u64,
+        );
     }
-
-    fn handle_kernel_sync(tf: &mut TrapFrame) {
-        print_uart("\n>>> Kernel sync trap caught (SVC #0)\n");
-
-        // Print saved register values to verify the save path
-        print_uart("Saved registers from trap frame:\n");
-        print_uart("  x1 = ");
-        print_uart_hex(tf.general.x1 as u64);
-        print_uart("\n  x2 = ");
-        print_uart_hex(tf.general.x2 as u64);
-        print_uart("\n  x3 = ");
-        print_uart_hex(tf.general.x3 as u64);
-        print_uart("\n  x4 = ");
-        print_uart_hex(tf.general.x4 as u64);
-        print_uart("\n  x5 = ");
-        print_uart_hex(tf.general.x5 as u64);
-        print_uart("\n  x6 = ");
-        print_uart_hex(tf.general.x6 as u64);
-        print_uart("\n");
-
-        // Check save: verify that the values we loaded before SVC arrived intact
-        if tf.general.x1 == 0x1111
-            && tf.general.x2 == 0x2222
-            && tf.general.x3 == 0x3333
-            && tf.general.x4 == 0x4444
-            && tf.general.x5 == 0x5555
-            && tf.general.x6 == 0x6666
-        {
-            print_uart("  [PASS] Register save verified!\n");
-        } else {
-            print_uart("  [FAIL] Register save mismatch!\n");
-        }
-
-        // Modify registers — these must be restored by trap_return
-        tf.general.x1 = 0xBEEF;
-        tf.general.x2 = 0xDEAD;
-        tf.general.x3 = 0xCAFE;
-        tf.general.x4 = 0xFACE;
-        tf.general.x5 = 0x1234;
-        tf.general.x6 = 0x5678;
-
-        print_uart("Modified trap frame: x1->BEEF x2->DEAD x3->CAFE x4->FACE x5->1234 x6->5678\n");
-    }
-
-    fn handle_kernel_irq(_tf: &mut TrapFrame) {
-        // ignore timer IRQs for now
-    }
-
-    fn handle_fiq(_tf: &mut TrapFrame) {
-        print_uart("[FAIL] Unexpected FIQ!\n");
-    }
-
-    fn handle_serror(_tf: &mut TrapFrame) {
-        print_uart("[FAIL] Unexpected SError!\n");
-    }
+    print_uart("MU enabled\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -125,93 +212,42 @@ impl TrapHandler for TestHandler {
 
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
-    // Initialise the kernel heap allocator.
+    // 1. Initialise the kernel heap allocator.
     unsafe {
         ALLOCATOR.lock().init(HEAP.as_mut_ptr(), HEAP_SIZE);
     }
 
     print_uart("Hello, QuackOS on QEMU ARM!\n");
 
-    // --- Initialise the trap subsystem ---
+    // 2. Initialise the trap subsystem.
     unsafe {
         trap::init();
     }
-    trap::install_trap_handler::<TestHandler>();
-    print_uart("Trap system initialised (VBAR + handler installed).\n");
+    print_uart("Trap system initialised.\n");
 
-    // --- Run kernel unit tests ---
-    kernel::tests::run_all();
-
-    // --- Test register save/restore via SVC round-trip ---
-    print_uart("\n=== Testing register save/restore via SVC #0 ===\n");
-    print_uart("Loading test values into regs...\n");
-
-    unsafe {
-        core::arch::asm!(
-            // Load known values into registers
-            "mov x1, #0x1111",
-            "mov x2, #0x2222",
-            "mov x3, #0x3333",
-            "mov x4, #0x4444",
-            "mov x5, #0x5555",
-            "mov x6, #0x6666",
-
-            // Trigger SVC — traps into handle_kernel_sync above
-            "svc #0",
-
-            // After trap_return, registers hold the values the handler set.
-            // Dump them to the static buffer for Rust-side verification.
-            "adrp x0, {reg_dump}",
-            "add  x0, x0, :lo12:{reg_dump}",
-            "stp  x1,  x2,  [x0]",
-            "stp  x3,  x4,  [x0, #16]",
-            "stp  x5,  x6,  [x0, #32]",
-
-            reg_dump = sym REG_DUMP,
-            clobber_abi("C"),
-        );
+    // 3. Register physical memory after the kernel image.
+    let bss_end = unsafe { &__bss_end as *const u8 as usize };
+    // Align up to 2MB boundary for safety, then free up to 512MB mark.
+    let free_start = (bss_end + 0x1FFFFF) & !0x1FFFFF;
+    let ram_end = 0x40000000 + 512 * 1024 * 1024 - 0x100000; // 512MB - 1MB for DTB/QEMU
+    if free_start < ram_end {
+        aarch64::base::mm::free_page_range(free_start, ram_end);
+        print_uart("Physical memory registered: ");
+        print_uart_hex(free_start as u64);
+        print_uart(" - ");
+        print_uart_hex(ram_end as u64);
+        print_uart("\n");
     }
 
-    // --- Verify restored register values ---
-    let regs = unsafe { REG_DUMP };
-    print_uart("\nRegisters after trap return:\n");
-    print_uart("  x1 = ");
-    print_uart_hex(regs[0]);
-    print_uart("\n  x2 = ");
-    print_uart_hex(regs[1]);
-    print_uart("\n  x3 = ");
-    print_uart_hex(regs[2]);
-    print_uart("\n  x4 = ");
-    print_uart_hex(regs[3]);
-    print_uart("\n  x5 = ");
-    print_uart_hex(regs[4]);
-    print_uart("\n  x6 = ");
-    print_uart_hex(regs[5]);
-    print_uart("\n");
+    // 4. Enable MMU.
+    setup_mmu();
 
-    let mut all_pass = true;
+    // 5. Initialise the scheduler.
+    kernel::sche::init();
+    print_uart("Scheduler initialised.\n");
 
-    if regs[0] == 0xBEEF
-        && regs[1] == 0xDEAD
-        && regs[2] == 0xCAFE
-        && regs[3] == 0xFACE
-        && regs[4] == 0x1234
-        && regs[5] == 0x5678
-    {
-        print_uart("[PASS] Register restore verified for all 6 regs!\n");
-    } else {
-        print_uart("[FAIL] Register restore mismatch!\n");
-        print_uart("       Expected: x1=BEEF x2=DEAD x3=CAFE x4=FACE x5=1234 x6=5678\n");
-        all_pass = false;
-    }
-
-    if all_pass {
-        print_uart("\n=== All tests PASSED ===\n");
-    } else {
-        print_uart("\n=== Some tests FAILED ===\n");
-    }
-
-    loop {}
+    // 6. Run the init process — load and execute /bin/bash.
+    usr::init::run_init();
 }
 
 #[panic_handler]
@@ -220,8 +256,7 @@ fn panic(info: &PanicInfo) -> ! {
     if let Some(loc) = info.location() {
         print_uart(loc.file());
         print_uart(" L");
-        let line = loc.line();
-        print_uart_hex(line as u64);
+        print_uart_num(loc.line() as usize);
     }
     print_uart("\n");
     loop {}

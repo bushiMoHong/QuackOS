@@ -436,7 +436,7 @@ impl<'a> Ext4ExtentBlock<'a> {
         &self,
         logical_block: u32,
         block_device: Arc<dyn BlockDevice>,
-        _ext4_block_size: usize,
+        ext4_block_size: usize,
     ) -> Option<Ext4Extent> {
         let header = self.extent_header();
         if header.depth == 0 {
@@ -470,12 +470,12 @@ impl<'a> Ext4ExtentBlock<'a> {
             {
                 let child_block_num = idx.physical_leaf_block();
                 let mut child_data =
-                    read_ext4_block(&block_device, child_block_num);
+                    read_ext4_block(&block_device, child_block_num, ext4_block_size);
                 let child_ext4_block = Ext4ExtentBlock::new(&mut child_data);
                 child_ext4_block.lookup_extent(
                     logical_block,
                     block_device,
-                    _ext4_block_size,
+                    ext4_block_size,
                 )
             } else {
                 None
@@ -488,6 +488,7 @@ impl<'a> Ext4ExtentBlock<'a> {
     pub fn iter_all_extents(
         &mut self,
         block_device: Arc<dyn BlockDevice>,
+        ext4_block_size: usize,
         result: &mut Vec<Ext4Extent>,
     ) {
         let header = self.extent_header();
@@ -502,9 +503,9 @@ impl<'a> Ext4ExtentBlock<'a> {
             for idx in idxs {
                 let child_block_num = idx.physical_leaf_block();
                 let mut child_data =
-                    read_ext4_block(&block_device, child_block_num);
+                    read_ext4_block(&block_device, child_block_num, ext4_block_size);
                 let mut child_block = Ext4ExtentBlock::new(&mut child_data);
-                child_block.iter_all_extents(block_device.clone(), result);
+                child_block.iter_all_extents(block_device.clone(), ext4_block_size, result);
             }
         } else {
             let extents = unsafe {

@@ -122,6 +122,10 @@ impl OpenFlags {
         Self(0)
     }
 
+    pub fn from_raw(bits: u32) -> Self {
+        Self(bits)
+    }
+
     pub fn bits(&self) -> u32 {
         self.0
     }

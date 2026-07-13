@@ -151,8 +151,8 @@ impl PageTableEntry {
     ///
     /// Maps the AArch64 hardware-independent flags to the real descriptor:
     /// - V  → bit[0]=1 (valid)
-    /// - R  → AP=0b11 if no W, else AP=0b01 (read-only vs read-write for EL0)
-    /// - W  → AP=0b01 (RW at all levels)
+    /// - R  → AP=0b11 (EL0 RO) if no W, else AP=0b01 (EL0 RW)
+    /// - W  → AP=0b01 (EL0+EL1 RW)
     /// - X  → UXN=0, PXN=0
     /// - U  → AP allows EL0 access; nG=1 (non-global)
     /// - G  → nG=0 (global)
@@ -166,19 +166,20 @@ impl PageTableEntry {
         desc |= pte::SH_INNER_SHAREABLE;
 
         // Access permissions
+        // AP[1]=1 → EL0 access; AP[2]=1 → read-only
         if flags.contains(PTEFlags::U) {
             // User-accessible
             if flags.contains(PTEFlags::W) {
-                desc |= pte::AP_EL0_RW_EL1_RW; // RW at all levels
+                desc |= pte::AP_EL0_RW_EL1_RW; // 0b01: EL0 RW
             } else if flags.contains(PTEFlags::R) {
-                desc |= pte::AP_EL0_RO_EL1_RW; // User read-only, kernel RW
+                desc |= pte::AP_EL0_RO_EL1_RO; // 0b11: EL0 RO
             } else {
-                desc |= pte::AP_EL0_NO_EL1_RW; // No EL0 access
+                desc |= pte::AP_EL1_RW_EL0_NO; // 0b00: EL0 no access
             }
             desc |= pte::NG; // Non-global (process-specific)
         } else {
             // Kernel-only
-            desc |= pte::AP_EL0_NO_EL1_RW;
+            desc |= pte::AP_EL1_RW_EL0_NO;
         }
 
         // Execute permissions: default non-executable unless X is set
@@ -197,9 +198,9 @@ impl PageTableEntry {
     /// Copy-on-write: from an existing writable PTE, clear W and mark COW.
     pub fn from_pte_cow(pte: PageTableEntry) -> Self {
         let mut desc = pte.bits;
-        // Set AP to read-only for EL0 (keep EL1 RW)
+        // Set AP to read-only for EL0 and EL1
         desc &= !(0b11 << 6);
-        desc |= pte::AP_EL0_RO_EL1_RW;
+        desc |= pte::AP_EL0_RO_EL1_RO;
         PageTableEntry { bits: desc }
     }
 
@@ -217,17 +218,18 @@ impl PageTableEntry {
     pub fn flags(&self) -> PTEFlags {
         let mut f = PTEFlags::empty();
         if self.is_valid() { f.insert(PTEFlags::V); }
-        // Decode AP field
+        // Decode AP field (correct encoding: AP[1]=EL0 access, AP[2]=RO)
         let ap = (self.bits >> 6) & 0b11;
         match ap {
-            0b00 | 0b01 => { f.insert(PTEFlags::R); f.insert(PTEFlags::W); }
-            0b10 => { f.insert(PTEFlags::R); } // read-only
-            _ => {} // no access
+            0b00 => { f.insert(PTEFlags::R); f.insert(PTEFlags::W); }              // EL1 RW
+            0b01 => { f.insert(PTEFlags::R); f.insert(PTEFlags::W); f.insert(PTEFlags::U); } // EL0 RW
+            0b10 => { f.insert(PTEFlags::R); }                                     // EL1 RO
+            0b11 => { f.insert(PTEFlags::R); f.insert(PTEFlags::U); }              // EL0 RO
+            _ => {}
         }
         if !self.contains(pte::UXN) || !self.contains(pte::PXN) {
             f.insert(PTEFlags::X);
         }
-        if ap != 0b11 { f.insert(PTEFlags::U); } // user-accessible
         if !self.contains(pte::NG) { f.insert(PTEFlags::G); }
         if self.contains(pte::AF) { f.insert(PTEFlags::A); }
         // D (dirty) is managed by the Access Flag / AP combination on ARM;
@@ -258,13 +260,12 @@ impl PageTableEntry {
     }
 
     pub fn readable(&self) -> bool {
-        let ap = (self.bits >> 6) & 0b11;
-        ap != 0b11 // Anything except "no EL0 or EL1 access"
+        self.is_valid() // Any valid mapping is readable by EL1 at minimum
     }
 
     pub fn writable(&self) -> bool {
         let ap = (self.bits >> 6) & 0b11;
-        ap == 0b00 || ap == 0b01 // Inner-shareable RW
+        ap == 0b00 || ap == 0b01 // AP[2]=0 → writable
     }
 
     pub fn executable(&self) -> bool {
@@ -273,13 +274,13 @@ impl PageTableEntry {
 
     pub fn is_user(&self) -> bool {
         let ap = (self.bits >> 6) & 0b11;
-        ap != 0b11 // AP != "EL0 no access"
+        ap & 0b01 != 0 // AP[1]=1 → EL0 accessible
     }
 
     pub fn is_cow(&self) -> bool {
         // COW pages are readable but not writable at user level
         let ap = (self.bits >> 6) & 0b11;
-        ap == 0b10 // EL0 read-only, EL1 RW
+        ap == 0b11 // AP=0b11: EL0 RO, EL1 RO (kernel writes via identity map)
     }
 
     pub fn is_shared(&self) -> bool {
