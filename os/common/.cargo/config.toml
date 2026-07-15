@@ -1,0 +1,2 @@
+[target.aarch64-unknown-none]
+runner = "qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -kernel"
