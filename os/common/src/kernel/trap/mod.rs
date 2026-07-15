@@ -74,6 +74,8 @@ pub enum TrapCause {
     PageFaultExec,
     /// Illegal instruction.
     IllegalInstruction,
+    /// Undefined instruction (UDF — permanently unallocated instruction encodings).
+    UndefinedInstruction,
     /// Breakpoint.
     Breakpoint,
     /// External / device interrupt (not timer).
@@ -113,14 +115,12 @@ impl TrapCause {
                 }
             }
             0b100000 | 0b100001 => TrapCause::PageFaultExec, // Instruction Abort
-            0b000000 | 0b000100 | 0b000101 => {
-                // Unknown reason, breakpoint, etc.
-                let iss = (esr & 0x1FF_FFFF) as usize;
-                match iss {
-                    0x00 => TrapCause::Breakpoint,
-                    _ => TrapCause::Other(ec),
-                }
+            0b000000 => {
+                // Unknown reason — typically UDF (permanently undefined encoding)
+                // ISS = 0 for UDF #0
+                TrapCause::UndefinedInstruction
             }
+            0b110000 | 0b110001 => TrapCause::Breakpoint, // BRK from AArch64
             0b111000 => TrapCause::IllegalInstruction,  // Trapped MSR/MRS
             _ => TrapCause::Other(ec),
         }
@@ -163,7 +163,6 @@ pub fn reflect_linux_syscall(tf: &mut TrapFrame) {
 
     let tid = sche::current_thread();
 
-    // Get per-thread handler pc and save_area
     let (handler_pc, save_area) = sche::with_thread(tid, |thread| {
         (thread.linux_handler_pc, thread.linux_save_area)
     })
@@ -171,10 +170,7 @@ pub fn reflect_linux_syscall(tf: &mut TrapFrame) {
 
     let handler_pc = match handler_pc {
         Some(pc) => pc,
-        None => {
-            // liblinux hasn't registered a handler — fall back to spin
-            loop { unsafe { core::arch::asm!("wfi"); } }
-        }
+        None => loop { unsafe { core::arch::asm!("wfi"); } },
     };
 
     let save_area = match save_area {
@@ -182,55 +178,84 @@ pub fn reflect_linux_syscall(tf: &mut TrapFrame) {
         None => loop { unsafe { core::arch::asm!("wfi"); } },
     };
 
-    // Build the LinuxContext from the current trap frame (usize → u64)
-    let ctx = LinuxContext {
-        x0: tf.general.x0 as u64, x1: tf.general.x1 as u64,
-        x2: tf.general.x2 as u64, x3: tf.general.x3 as u64,
-        x4: tf.general.x4 as u64, x5: tf.general.x5 as u64,
-        x6: tf.general.x6 as u64, x7: tf.general.x7 as u64,
-        x8: tf.general.x8 as u64,
-        x9: tf.general.x9 as u64, x10: tf.general.x10 as u64,
-        x11: tf.general.x11 as u64, x12: tf.general.x12 as u64,
-        x13: tf.general.x13 as u64, x14: tf.general.x14 as u64,
-        x15: tf.general.x15 as u64, x16: tf.general.x16 as u64,
-        x17: tf.general.x17 as u64, x18: tf.general.x18 as u64,
-        x19: tf.general.x19 as u64, x20: tf.general.x20 as u64,
-        x21: tf.general.x21 as u64, x22: tf.general.x22 as u64,
-        x23: tf.general.x23 as u64, x24: tf.general.x24 as u64,
-        x25: tf.general.x25 as u64, x26: tf.general.x26 as u64,
-        x27: tf.general.x27 as u64, x28: tf.general.x28 as u64,
-        x29: tf.general.x29 as u64, x30: tf.general.x30 as u64,
-        elr: tf.elr as u64,
-        spsr: tf.spsr as u64,
-        sp: tf.sp as u64,
-    };
+    // Debug: print what we're saving (BEFORE)
+    uart_puts("[REFL] save_area=");
+    uart_put_hex(save_area as u64);
+    uart_puts(" handler_pc=");
+    uart_put_hex(handler_pc as u64);
+    uart_puts("\n[REFL] BEFORE: tf.elr=");
+    uart_put_hex(tf.elr as u64);
+    uart_puts(" tf.x0=");
+    uart_put_hex(tf.general.x0 as u64);
+    uart_puts(" tf.x8=");
+    uart_put_hex(tf.general.x8 as u64);
+    uart_puts("\n");
 
-    // Write the context to user-space save_area (liblinux will read it)
+    // Save Linux program context to per-thread save_area using scalar u64 writes.
     unsafe {
-        core::ptr::write_volatile(save_area as *mut LinuxContext, ctx);
+        let dst = save_area as *mut u64;
+        core::ptr::write_volatile(dst.add(0),  tf.general.x0 as u64);
+        core::ptr::write_volatile(dst.add(1),  tf.general.x1 as u64);
+        core::ptr::write_volatile(dst.add(2),  tf.general.x2 as u64);
+        core::ptr::write_volatile(dst.add(3),  tf.general.x3 as u64);
+        core::ptr::write_volatile(dst.add(4),  tf.general.x4 as u64);
+        core::ptr::write_volatile(dst.add(5),  tf.general.x5 as u64);
+        core::ptr::write_volatile(dst.add(6),  tf.general.x6 as u64);
+        core::ptr::write_volatile(dst.add(7),  tf.general.x7 as u64);
+        core::ptr::write_volatile(dst.add(8),  tf.general.x8 as u64);
+        core::ptr::write_volatile(dst.add(9),  tf.general.x9 as u64);
+        core::ptr::write_volatile(dst.add(10), tf.general.x10 as u64);
+        core::ptr::write_volatile(dst.add(11), tf.general.x11 as u64);
+        core::ptr::write_volatile(dst.add(12), tf.general.x12 as u64);
+        core::ptr::write_volatile(dst.add(13), tf.general.x13 as u64);
+        core::ptr::write_volatile(dst.add(14), tf.general.x14 as u64);
+        core::ptr::write_volatile(dst.add(15), tf.general.x15 as u64);
+        core::ptr::write_volatile(dst.add(16), tf.general.x16 as u64);
+        core::ptr::write_volatile(dst.add(17), tf.general.x17 as u64);
+        core::ptr::write_volatile(dst.add(18), tf.general.x18 as u64);
+        core::ptr::write_volatile(dst.add(19), tf.general.x19 as u64);
+        core::ptr::write_volatile(dst.add(20), tf.general.x20 as u64);
+        core::ptr::write_volatile(dst.add(21), tf.general.x21 as u64);
+        core::ptr::write_volatile(dst.add(22), tf.general.x22 as u64);
+        core::ptr::write_volatile(dst.add(23), tf.general.x23 as u64);
+        core::ptr::write_volatile(dst.add(24), tf.general.x24 as u64);
+        core::ptr::write_volatile(dst.add(25), tf.general.x25 as u64);
+        core::ptr::write_volatile(dst.add(26), tf.general.x26 as u64);
+        core::ptr::write_volatile(dst.add(27), tf.general.x27 as u64);
+        core::ptr::write_volatile(dst.add(28), tf.general.x28 as u64);
+        core::ptr::write_volatile(dst.add(29), tf.general.x29 as u64);
+        core::ptr::write_volatile(dst.add(30), tf.general.x30 as u64);
+        core::ptr::write_volatile(dst.add(31), tf.elr as u64);
+        core::ptr::write_volatile(dst.add(32), tf.spsr as u64);
+        core::ptr::write_volatile(dst.add(33), tf.sp as u64);
     }
 
-    // Redirect execution to the liblinux handler.
-    // When trap_return runs, it will eret into the handler with:
-    //   x0  = save_area vaddr (pointer to the saved context above)
-    //   ELR = handler_pc
-    //   SPSR = user mode (EL0t)
-    //   SP  = we need a stack pointer for the handler...
-    //
-    // For the initial implementation, the liblinux handler uses the same
-    // user stack.  A dedicated handler stack (stored per-thread) will be
-    // added when multi-threaded Linux programs need it (§8.7).
+    // Verify: read back first 2 words from save_area
+    uart_puts("[REFL] VERIFY save_area[0]=");
+    uart_put_hex(unsafe { core::ptr::read_volatile(save_area as *const u64) });
+    uart_puts(" [1]=");
+    uart_put_hex(unsafe { core::ptr::read_volatile((save_area as *const u64).add(1)) });
+    uart_puts("\n");
+
+    // Redirect execution to liblinux handler
     tf.elr = handler_pc;
     tf.general.x0 = save_area;
-    tf.spsr = 0; // EL0t with all exception levels masked
-    // SP remains as-is (user stack); liblinux handler must be careful
-    // not to overflow the user stack.
+    tf.spsr = 0; // EL0t
+
+    // Debug: AFTER modification
+    uart_puts("[REFL] AFTER:  tf.elr=");
+    uart_put_hex(tf.elr as u64);
+    uart_puts(" tf.x0=");
+    uart_put_hex(tf.general.x0 as u64);
+    uart_puts(" RAW[280]=");
+    uart_put_hex(unsafe { core::ptr::read_volatile((tf as *const TrapFrame as *const u8).add(280) as *const u64) });
+    uart_puts("\n");
 }
 
 struct CommonTrapHandler;
 
 /// UART output: write a single byte to the PL011 at 0x09000000.
-fn uart_putc(c: u8) {
+pub(crate) fn uart_putc(c: u8) {
     const UART0_DR: *mut u8 = 0x09000000 as *mut u8;
     unsafe { core::ptr::write_volatile(UART0_DR, c); }
 }
@@ -249,10 +274,112 @@ fn uart_puts(s: &str) {
     for b in s.bytes() { uart_putc(b); }
 }
 
+// ---------------------------------------------------------------------------
+// Syscall name helpers for debug output
+// ---------------------------------------------------------------------------
+
+fn linux_syscall_name(nr: usize) -> &'static str {
+    match nr {
+        17  => "getcwd",
+        56  => "openat",
+        57  => "close",
+        63  => "read",
+        64  => "write",
+        80  => "fstat",
+        93  => "exit",
+        94  => "exit_group",
+        96  => "set_tid_address",
+        160 => "uname",
+        172 => "getpid",
+        174 => "getuid",
+        175 => "geteuid",
+        176 => "getgid",
+        177 => "getegid",
+        214 => "brk",
+        215 => "munmap",
+        222 => "mmap",
+        278 => "getrandom",
+        _   => "?",
+    }
+}
+
+fn native_syscall_name(nr: usize) -> &'static str {
+    match nr {
+        1  => "map_page",
+        2  => "unmap_page",
+        3  => "ipc_send",
+        4  => "ipc_recv",
+        5  => "ipc_call",
+        6  => "create_thread",
+        7  => "exit_thread",
+        8  => "register_linux_handler",
+        9  => "linux_syscall_done",
+        10 => "yield_cpu",
+        _  => "?",
+    }
+}
+
 impl TrapHandler for CommonTrapHandler {
     fn handle_user_sync(tf: &mut TrapFrame) {
         let esr = tf.esr();
         let ec = ((esr >> 26) & 0x3F) as usize;
+
+        // Debug: print first few user exceptions with classification
+        {
+            static mut DBG_COUNT: usize = 0;
+            unsafe {
+                if DBG_COUNT < 20 {
+                    DBG_COUNT += 1;
+                    if ec == 0x15 {
+                        let svc_imm = (esr & 0xFFFF) as u32;
+                        let nr = tf.general.x8;
+                        match svc_imm {
+                            0 => {
+                                // Linux syscall
+                                let name = linux_syscall_name(nr);
+                                uart_puts("[TRAP] SVC#0 LINUX nr=");
+                                uart_put_hex(nr as u64);
+                                uart_puts(" (");
+                                uart_puts(name);
+                                uart_puts(") ELR=");
+                                uart_put_hex(tf.elr as u64);
+                                uart_puts(" x0=");
+                                uart_put_hex(tf.general.x0 as u64);
+                            }
+                            1 => {
+                                // Native syscall
+                                let name = native_syscall_name(nr);
+                                uart_puts("[TRAP] SVC#1 NATIVE nr=");
+                                uart_put_hex(nr as u64);
+                                uart_puts(" (");
+                                uart_puts(name);
+                                uart_puts(")");
+                                if nr == 8 {
+                                    uart_puts(" x0=");
+                                    uart_put_hex(tf.general.x0 as u64);
+                                    uart_puts(" x1=");
+                                    uart_put_hex(tf.general.x1 as u64);
+                                }
+                                uart_puts(" ELR=");
+                                uart_put_hex(tf.elr as u64);
+                            }
+                            _ => {
+                                uart_puts("[TRAP] SVC#");
+                                uart_put_hex(svc_imm as u64);
+                                uart_puts(" UNKNOWN ELR=");
+                                uart_put_hex(tf.elr as u64);
+                            }
+                        }
+                    } else {
+                        uart_puts("[TRAP] user EC=");
+                        uart_put_hex(ec as u64);
+                        uart_puts(" ELR=");
+                        uart_put_hex(tf.elr as u64);
+                    }
+                    uart_puts("\n");
+                }
+            }
+        }
 
         match ec {
             // ── SVC from AArch64 (0b010101) ──
@@ -269,6 +396,8 @@ impl TrapHandler for CommonTrapHandler {
                     }
                     1 => {
                         // QuackOS native syscall (SVC #1) → kernel dispatch
+                        // ELR already points past the SVC (AArch64 SVC saves PC+4).
+                        // Do NOT add 4 here — that would skip the next instruction.
                         let nr = tf.general.x8 as u64;
                         native::native_syscall_dispatch(nr, tf);
                     }
@@ -297,9 +426,137 @@ impl TrapHandler for CommonTrapHandler {
                     }
                     TrapCause::PageFaultLoad | TrapCause::PageFaultStore | TrapCause::PageFaultExec => {
                         let fault_addr = tf.fault_addr();
-                        uart_puts("[PF] page fault at ");
+                        let rw = match cause {
+                            TrapCause::PageFaultLoad => "READ",
+                            TrapCause::PageFaultStore => "WRITE",
+                            _ => "EXEC",
+                        };
+                        uart_puts("[PF] ");
+                        uart_puts(rw);
+                        uart_puts(" at ");
                         uart_put_hex(fault_addr as u64);
                         uart_puts(" ELR=");
+                        uart_put_hex(tf.elr as u64);
+                        uart_puts(" ESR=");
+                        uart_put_hex(esr);
+                        uart_puts("\n");
+                        // Dump regs most likely to be address/base registers
+                        uart_puts("[PF] x0="); uart_put_hex(tf.general.x0 as u64);
+                        uart_puts(" x1=");     uart_put_hex(tf.general.x1 as u64);
+                        uart_puts(" x2=");     uart_put_hex(tf.general.x2 as u64);
+                        uart_puts(" x3=");     uart_put_hex(tf.general.x3 as u64);
+                        uart_puts("\n");
+                        uart_puts("[PF] x4="); uart_put_hex(tf.general.x4 as u64);
+                        uart_puts(" x5=");     uart_put_hex(tf.general.x5 as u64);
+                        uart_puts(" x6=");     uart_put_hex(tf.general.x6 as u64);
+                        uart_puts(" x7=");     uart_put_hex(tf.general.x7 as u64);
+                        uart_puts(" x8=");     uart_put_hex(tf.general.x8 as u64);
+                        uart_puts("\n");
+                        uart_puts("[PF] x9="); uart_put_hex(tf.general.x9 as u64);
+                        uart_puts(" x10=");    uart_put_hex(tf.general.x10 as u64);
+                        uart_puts(" x11=");    uart_put_hex(tf.general.x11 as u64);
+                        uart_puts(" x12=");    uart_put_hex(tf.general.x12 as u64);
+                        uart_puts(" SP=");     uart_put_hex(tf.sp as u64);
+                        uart_puts("\n");
+                        // Dump buffer contents: buf is at __init_libc sp + 0x60
+                        // __init_libc sp = tf.sp + 16 (undo __init_tls's stp [sp,#-16]!)
+                        {
+                            // Calculate __init_libc's stack pointer
+                            let init_libc_sp = tf.sp + 16;
+                            let buf_base = init_libc_sp + 0x60;
+                            uart_puts("[BUF] init_libc_sp=");
+                            uart_put_hex(init_libc_sp as u64);
+                            uart_puts(" buf=");
+                            uart_put_hex(buf_base as u64);
+                            uart_puts("\n");
+
+                            // Scan all buf entries [0..38) — 304 bytes / 8
+                            for i in 0_usize..38 {
+                                let ptr = (buf_base + i * 8) as *const u64;
+                                let val = unsafe { core::ptr::read_volatile(ptr) };
+                                if val != 0 {
+                                    uart_puts("[BUF]   [");
+                                    uart_put_hex(i as u64);
+                                    uart_puts("]=");
+                                    uart_put_hex(val);
+                                    uart_puts("\n");
+                                }
+                            }
+                        }
+
+                        // Dump raw auxv on initial user stack (set up by liblinux)
+                        // USER_STACK_TOP = 0x7FFFFFF10000, liblinux writes auxv at TOP - 4096
+                        {
+                            let auxv_base = 0x7FFFFFF10000usize - 4096;
+                            uart_puts("[AUXV] base=");
+                            uart_put_hex(auxv_base as u64);
+                            uart_puts("\n");
+                            for i in 0_usize..32 {
+                                let ptr = (auxv_base + i * 8) as *const u64;
+                                let val = unsafe { core::ptr::read_volatile(ptr) };
+                                if val != 0 || i <= 15 {
+                                    uart_puts("[AUXV]  +");
+                                    uart_put_hex((i * 8) as u64);
+                                    uart_puts("=");
+                                    uart_put_hex(val);
+                                    uart_puts("\n");
+                                }
+                            }
+                        }
+
+                        // Read BootInfo at 0x204028 directly
+                        {
+                            let bi_base = 0x204028usize;
+                            uart_puts("[BOOT] addr=");
+                            uart_put_hex(bi_base as u64);
+                            uart_puts("\n");
+                            for i in 0_usize..6 {
+                                let ptr = (bi_base + i * 8) as *const u64;
+                                let val = unsafe { core::ptr::read_volatile(ptr) };
+                                uart_puts("[BOOT]  +");
+                                uart_put_hex((i * 8) as u64);
+                                uart_puts("=");
+                                uart_put_hex(val);
+                                uart_puts("\n");
+                            }
+                        }
+
+                        // Translate key VAs to PAs to detect page aliasing
+                        {
+                            use crate::kernel::trap::context::TrapFrame;
+                            // Use aarch64::base::mm::PageTable
+                            let l0_pa = *crate::KERNEL_L0_PA.lock();
+                            let pt = aarch64::base::mm::page_table::PageTable::from_token(l0_pa);
+                            let vas = [
+                                (0x200000usize, "liblinux_code"),
+                                (0x7FFF_FFF0_F000usize, "user_stack"),
+                                (0x204028usize, "bootinfo"),
+                            ];
+                            for (va, name) in &vas {
+                                match pt.translate_va_to_pa(aarch64::base::mm::VirtAddr(*va)) {
+                                    Some(pa) => {
+                                        uart_puts("[PT] ");
+                                        uart_puts(name);
+                                        uart_puts(" VA=");
+                                        uart_put_hex(*va as u64);
+                                        uart_puts(" PA=");
+                                        uart_put_hex(pa as u64);
+                                        uart_puts("\n");
+                                    }
+                                    None => {
+                                        uart_puts("[PT] ");
+                                        uart_puts(name);
+                                        uart_puts(" UNMAPPED\n");
+                                    }
+                                }
+                            }
+                        }
+                        loop {
+                            unsafe { core::arch::asm!("wfi"); }
+                        }
+                    }
+                    TrapCause::UndefinedInstruction => {
+                        uart_puts("[UDEF] undefined instruction at ELR=");
                         uart_put_hex(tf.elr as u64);
                         uart_puts(" ESR=");
                         uart_put_hex(esr);
@@ -309,7 +566,10 @@ impl TrapHandler for CommonTrapHandler {
                         }
                     }
                     TrapCause::Breakpoint => {
-                        uart_puts("[DBG] breakpoint\n");
+                        uart_puts("[BRK] breakpoint at ELR=");
+                        uart_put_hex(tf.elr as u64);
+                        uart_puts("\n");
+                        tf.elr += 4; // skip past BRK #imm
                     }
                     _ => {
                         uart_puts("[KILL] unhandled user exception, ESR=");

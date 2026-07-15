@@ -3,14 +3,14 @@ ENTRY(_start)
 
 PHDRS
 {
-  text   PT_LOAD FLAGS((1 << 0) | (1 << 2)); /* R-X */
-  rodata PT_LOAD FLAGS((1 << 0));            /* R-- */
-  data   PT_LOAD FLAGS((1 << 0) | (1 << 1)); /* RW- */
+  text   PT_LOAD FLAGS((1 << 0) | (1 << 2)); /* R-X: PF_X | PF_R */
+  rodata PT_LOAD FLAGS((1 << 2));            /* R--: PF_R */
+  data   PT_LOAD FLAGS((1 << 2) | (1 << 1)); /* RW-: PF_R | PF_W */
 }
 
 SECTIONS
 {
-  . = 0x400000;
+  . = 0x200000;
 
   .text : {
     *(.text._start)

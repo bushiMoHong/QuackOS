@@ -53,6 +53,7 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
         8  => sys_register_linux_handler(tf),
         9  => sys_linux_syscall_done(tf),
         10 => sys_yield(tf),
+        11 => sys_console_write(tf),
         _  => {
             tf.general.x0 = (-ENOSYS) as usize;
         }
@@ -446,8 +447,33 @@ fn sys_exit_thread(tf: &mut TrapFrame) {
 /// args: x0=handler_pc (user-mode liblinux handler entry VA)
 ///       x1=save_area_vaddr (per-thread save area VA for LinuxContext)
 fn sys_register_linux_handler(tf: &mut TrapFrame) {
+    // Read from x0/x1 — the natural ARM64 calling convention.
+    // liblinux passes handler_pc in x0 and save_area in x1 via inout("x0")/in("x1").
     let handler_pc = tf.general.x0;
     let save_area = tf.general.x1;
+
+    // Debug: dump registers AND raw memory at trap frame offsets
+    use super::uart_puts;
+    use super::uart_put_hex;
+    let tf_base = tf as *const TrapFrame as *const u8;
+    uart_puts("[REGHLR] tf.general.x0=");
+    uart_put_hex(tf.general.x0 as u64);
+    uart_puts(" x1=");
+    uart_put_hex(tf.general.x1 as u64);
+    uart_puts("\n[REGHLR] x30=");
+    uart_put_hex(tf.general.x30 as u64);
+    uart_puts(" x8=");
+    uart_put_hex(tf.general.x8 as u64);
+    uart_puts(" elr=");
+    uart_put_hex(tf.elr as u64);
+    // Raw memory reads to verify struct layout
+    uart_puts("\n[REGHLR] RAW[272]=");
+    uart_put_hex(unsafe { core::ptr::read_volatile(tf_base.add(272) as *const u64) });
+    uart_puts(" RAW[280]=");
+    uart_put_hex(unsafe { core::ptr::read_volatile(tf_base.add(280) as *const u64) });
+    uart_puts(" RAW[40]=");
+    uart_put_hex(unsafe { core::ptr::read_volatile(tf_base.add(40) as *const u64) });
+    uart_puts("\n");
 
     let tid = crate::kernel::sche::current_thread();
     let result = crate::kernel::sche::with_thread_mut(tid, |thread| {
@@ -469,6 +495,10 @@ fn sys_register_linux_handler(tf: &mut TrapFrame) {
 ///
 /// args: x0 = return_value (the Linux syscall result)
 fn sys_linux_syscall_done(tf: &mut TrapFrame) {
+    use super::uart_puts;
+    use super::uart_put_hex;
+    uart_puts("[LSD] sys_linux_syscall_done entered\n");
+
     let return_value = tf.general.x0;
 
     let tid = crate::kernel::sche::current_thread();
@@ -481,7 +511,7 @@ fn sys_linux_syscall_done(tf: &mut TrapFrame) {
     let save_area = match save_area {
         Ok(Some(addr)) => addr,
         _ => {
-            // No save_area registered — shouldn't happen in normal flow
+            uart_puts("[LSD] no save_area, hanging\n");
             loop { unsafe { core::arch::asm!("wfi"); } }
         }
     };
@@ -494,9 +524,29 @@ fn sys_linux_syscall_done(tf: &mut TrapFrame) {
         core::ptr::read_volatile(ctx_ptr)
     };
 
+    uart_puts("[LSD] save_area=");
+    uart_put_hex(save_area as u64);
+    uart_puts(" ret_val=");
+    uart_put_hex(return_value as u64);
+    uart_puts("\n[LSD] ctx.elr=");
+    uart_put_hex(ctx.elr);
+    uart_puts(" ctx.spsr=");
+    uart_put_hex(ctx.spsr);
+    uart_puts(" ctx.sp=");
+    uart_put_hex(ctx.sp);
+    uart_puts(" ctx.x8=");
+    uart_put_hex(ctx.x8);
+    uart_puts("\n[LSD] tf.elr(after)=");
+    uart_put_hex(tf.elr as u64);
+    uart_puts(" tf.spsr(after)=");
+    uart_put_hex(tf.spsr as u64);
+    uart_puts(" tf.sp(after)=");
+    uart_put_hex(tf.sp as u64);
+    uart_puts("\n");
+
     // Restore the original Linux program context (u64 → usize casts are
     // no-ops on AArch64 where both types are 64-bit).
-    tf.elr = (ctx.elr + 4) as usize; // skip past the SVC instruction
+    tf.elr = ctx.elr as usize; // ELR already points past SVC (hardware saves PC+4)
     tf.spsr = ctx.spsr as usize;
     tf.sp = ctx.sp as usize;
     tf.general.x0 = return_value;
@@ -525,4 +575,19 @@ fn sys_linux_syscall_done(tf: &mut TrapFrame) {
 fn sys_yield(tf: &mut TrapFrame) {
     crate::kernel::sche::schedule();
     tf.general.x0 = 0; // success (after we're scheduled back)
+}
+
+// ---------------------------------------------------------------------------
+// 11. sys_console_write — write bytes to UART from user mode
+// ---------------------------------------------------------------------------
+fn sys_console_write(tf: &mut TrapFrame) {
+    let buf_ptr = tf.general.x0;
+    let len = tf.general.x1;
+
+    let n = len.min(4096);
+    for i in 0..n {
+        let byte = unsafe { core::ptr::read_volatile((buf_ptr as *const u8).add(i)) };
+        unsafe { core::ptr::write_volatile(0x09000000 as *mut u8, byte); }
+    }
+    tf.general.x0 = n;
 }

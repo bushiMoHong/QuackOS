@@ -35,7 +35,7 @@ use super::pte;
 /// 包含一个 usize 的 count，一个 Option<PhysPageNum> 的 next，
 /// 剩下的空间全部用来存 PhysPageNum (8 字节)。
 /// (4096 - 8 - 8) / 8 = 510
-const TRACKER_CAPACITY: usize = 510;
+const TRACKER_CAPACITY: usize = 509;
 
 // ---------------------------------------------------------------------------
 // PTEFlags — logical permission flags (hardware-independent layer)
@@ -303,6 +303,8 @@ pub struct PageTable {
     pub root_ppn: PhysPageNum,
     /// 指向第一个 TrackerPage 的物理页号
     tracker_head: Option<PhysPageNum>,
+    /// Whether this PageTable owns the root page and should free it on drop.
+    owns_root: bool,
 }
 
 impl PageTable {
@@ -343,8 +345,10 @@ impl PageTable {
 
 impl Drop for PageTable {
     fn drop(&mut self) {
-        // 1. 释放根页表
-        free_page(PhysAddr::from(self.root_ppn).0);
+        // 1. 释放根页表 (仅当 PageTable 拥有根页表时)
+        if self.owns_root {
+            free_page(PhysAddr::from(self.root_ppn).0);
+        }
 
         // 2. 遍历 TrackerPage 链表，释放所有中间页表，最后释放 TrackerPage 本身
         let mut current_opt = self.tracker_head;
@@ -381,6 +385,7 @@ impl PageTable {
         PageTable {
             root_ppn: PhysPageNum::from(frame >> PAGE_SHIFT),
             tracker_head: None,
+            owns_root: true,
         }
     }
 
@@ -395,6 +400,7 @@ impl PageTable {
         PageTable {
             root_ppn: PhysPageNum::from(root_pa >> PAGE_SHIFT),
             tracker_head: None,
+            owns_root: false, // borrowed view — do not free the root on drop
         }
     }
 
@@ -580,6 +586,7 @@ impl PageTable {
             let ppn = PhysPageNum::from(pa >> PAGE_SHIFT);
 
             pte_arr[idxs[3]] = PageTableEntry::new(ppn, flags);
+            tlb_invalidate_addr(VirtAddr::from(VirtPageNum(vpn)));
             vpn += 1;
 
             // Crossed into a new L3 table

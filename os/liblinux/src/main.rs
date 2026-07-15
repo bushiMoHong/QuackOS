@@ -19,6 +19,7 @@ mod misc;
 mod mm;
 mod native;
 mod proc;
+mod syscall;
 mod task;
 
 use core::arch::asm;
@@ -30,13 +31,16 @@ use task::TaskStruct;
 // ---------------------------------------------------------------------------
 
 /// Fixed user-space address where the kernel writes BootInfo.
-const BOOTINFO_ADDR: usize = 0x7FFF_FFEF_FFA0;
+const BOOTINFO_ADDR: usize = 0x204028; // same as SAVE_AREA, overwritten after BootInfo consumed
 
 #[repr(C)]
 struct BootInfo {
     program_entry: u64,
     stack_top:    u64,
     brk:          u64,
+    phdr_addr:    u64,
+    phent_size:   u64,
+    phnum:        u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -62,27 +66,7 @@ fn dispatch_linux_syscall(
     a0: usize, a1: usize, a2: usize,
     a3: usize, a4: usize, a5: usize,
 ) -> u64 {
-    match nr {
-        17  => misc::sys_getcwd(a0, a1),
-        56  => fs::sys_openat(task, a0, a1, a2, a3),
-        57  => fs::sys_close(task, a0),
-        63  => fs::sys_read(task, a0, a1, a2),
-        64  => fs::sys_write(task, a0, a1, a2),
-        80  => fs::sys_fstat(task, a0, a1),
-        93  => proc::sys_exit(task, a0),
-        94  => proc::sys_exit_group(task, a0),
-        160 => misc::sys_uname(a0),
-        172 => proc::sys_getpid(task),
-        174 => proc::sys_getuid(task),
-        175 => proc::sys_geteuid(task),
-        176 => proc::sys_getgid(task),
-        177 => proc::sys_getegid(task),
-        214 => mm::sys_brk(task, a0),
-        215 => mm::sys_munmap(task, a0, a1),
-        222 => mm::sys_mmap(task, a0, a1, a2, a3, a4, a5),
-        278 => misc::sys_getrandom(a0, a1, a2),
-        _   => u64::from_le_bytes((-(errno::ENOSYS as i64)).to_le_bytes()),
-    }
+    syscall::dispatch(task, nr, a0, a1, a2, a3, a4, a5)
 }
 
 // ---------------------------------------------------------------------------
@@ -133,15 +117,61 @@ pub extern "C" fn _start() -> ! {
     // 3. Initialise per-process state.
     unsafe { TASK = Some(TaskStruct::new(bootinfo.brk as usize)); }
 
-    // 4. Jump to the Linux binary — we never return from here.
+    // 4. Set up the Linux program's initial stack, then jump to it.
+    //
+    // AArch64 Linux process entry convention:
+    //   sp → argc (8 bytes)
+    //        argv[0..argc], NULL  (8 bytes each)
+    //        envp[0..N], NULL     (8 bytes each)
+    //        auxv[0..N], AT_NULL  (16 bytes each)
+    //        (16-byte aligned)
+    //
+    // Reserve one page for this data below the stack top.
     let entry = bootinfo.program_entry as usize;
-    let stack = bootinfo.stack_top as usize;
+    let sp = bootinfo.stack_top as usize - 4096;
+
+    // Helper constants
+    const AT_PHDR: u64   = 3;
+    const AT_PHENT: u64  = 4;
+    const AT_PHNUM: u64  = 5;
+    const AT_PAGESZ: u64 = 6;
+    const AT_ENTRY: u64  = 9;
+    const AT_NULL: u64   = 0;
+
+    unsafe {
+        let p = sp as *mut u64;
+        // Zero the auxv region first — the stack page may contain stale data
+        // from the physical page allocator (not guaranteed to be zeroed).
+        core::ptr::write_bytes(p, 0u8, 16 * 8);
+        // argc
+        p.write_volatile(0);
+        // argv terminator
+        p.add(1).write_volatile(0);
+        // envp terminator
+        p.add(2).write_volatile(0);
+        // auxv
+        p.add(3).write_volatile(AT_PHDR);
+        p.add(4).write_volatile(bootinfo.phdr_addr);
+        p.add(5).write_volatile(AT_PHENT);
+        p.add(6).write_volatile(bootinfo.phent_size);
+        p.add(7).write_volatile(AT_PHNUM);
+        p.add(8).write_volatile(bootinfo.phnum);
+        p.add(9).write_volatile(AT_PAGESZ);
+        p.add(10).write_volatile(4096);
+        p.add(11).write_volatile(AT_ENTRY);
+        p.add(12).write_volatile(bootinfo.program_entry);
+        // AT_NULL terminator
+        p.add(13).write_volatile(AT_NULL);
+        p.add(14).write_volatile(0);
+
+        asm!("dsb ishst");
+    }
 
     unsafe {
         asm!(
             "mov sp, {sp}",
             "br  {entry}",
-            sp = in(reg) stack,
+            sp = in(reg) sp,
             entry = in(reg) entry,
             options(noreturn)
         );

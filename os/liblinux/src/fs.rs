@@ -34,19 +34,18 @@ pub fn sys_write(task: &mut TaskStruct, fd: usize, buf_ptr: usize, count: usize)
             (-errno::EBADF as u64)
         }
     } else {
-        // stdout (1) / stderr (2) → write to UART directly
+        // stdout (1) / stderr (2) → write to UART via native syscall
         // fd 0 (stdin) writes → not supported yet
         if fd == 0 {
             return (-errno::EBADF as u64);
         }
         let len = count.min(4096);
-        for i in 0..len {
-            unsafe {
-                let byte = *((buf_ptr as *const u8).add(i));
-                core::ptr::write_volatile(0x09000000 as *mut u8, byte);
-            }
+        let ret = unsafe { crate::native::console_write(buf_ptr as *const u8, len) };
+        if ret < 0 {
+            (-crate::errno::EIO as u64)
+        } else {
+            ret as u64
         }
-        count as u64
     }
 }
 
@@ -110,6 +109,36 @@ pub fn sys_close(task: &mut TaskStruct, fd: usize) -> u64 {
     } else {
         (-errno::EBADF as u64)
     }
+}
+
+/// ioctl(fd, request, arg) — syscall 29
+pub fn sys_ioctl(fd: usize, _request: usize, _arg: usize) -> u64 {
+    // All standard fds are non-terminal; return ENOTTY so musl treats them
+    // as regular files instead of trying terminal ioctls.
+    if fd <= 2 {
+        (-crate::errno::ENOTTY as u64)
+    } else {
+        (-crate::errno::ENOTTY as u64)
+    }
+}
+
+/// writev(fd, iov, iovcnt) — syscall 66
+pub fn sys_writev(task: &mut TaskStruct, fd: usize, iov: usize, iovcnt: usize) -> u64 {
+    // struct iovec { void *iov_base; size_t iov_len; } — 16 bytes each
+    let mut total: u64 = 0;
+    for i in 0..iovcnt {
+        let base = unsafe { *((iov + i * 16) as *const usize) };
+        let len  = unsafe { *((iov + i * 16 + 8) as *const usize) };
+        if len == 0 { continue; }
+        let n = sys_write(task, fd, base, len);
+        // sys_write returns a u64; negative errno values are encoded as large
+        // u64 (e.g. -25u64 = 0xffffffe7).  Check the sign bit.
+        if (n as i64) < 0 {
+            return n;
+        }
+        total += n;
+    }
+    total
 }
 
 /// fstat(fd, statbuf) — syscall 80

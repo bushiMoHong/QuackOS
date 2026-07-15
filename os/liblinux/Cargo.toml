@@ -6,6 +6,9 @@ edition = "2021"
 # Standalone user-space crate — not part of the kernel workspace.
 # Built separately by the Makefile before the kernel.
 
+[dependencies]
+xmas-elf = { version = "0.10.0", default-features = false }
+
 [workspace]
 
 [[bin]]

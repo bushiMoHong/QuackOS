@@ -1,18 +1,27 @@
 //! User-space ELF loader — loads a statically-linked Linux binary.
 //!
-//! Parses the ELF file from the filesystem (via FsServer IPC), maps
-//! PT_LOAD segments into the current address space, and returns the
-//! entry point.
+//! Uses `xmas_elf` for parsing (same as the kernel's `elf_loader`) and
+//! `native::map_page` / IPC for mapping and file I/O from user space.
+//!
+//! The flow mirrors `load_elf_bytes` from the kernel: parse PT_LOAD segments,
+//! map pages with the correct permissions, copy file data, and zero BSS.
 
 use crate::ipc;
 use crate::native;
+use xmas_elf::program::{Flags, Type};
+use xmas_elf::ElfFile;
 
-const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
-const PT_LOAD: u32 = 1;
-const PF_X: u32 = 1;
-const PF_W: u32 = 2;
-const PF_R: u32 = 4;
 const PAGE_SIZE: usize = 4096;
+
+/// Map flags from ELF program header to native prot bits.
+/// bit0=READ, bit1=WRITE, bit2=EXEC
+fn flags_to_prot(ph_flags: Flags) -> usize {
+    let mut prot = 0usize;
+    if ph_flags.is_read()    { prot |= 1; }
+    if ph_flags.is_write()   { prot |= 2; }
+    if ph_flags.is_execute() { prot |= 4; }
+    prot
+}
 
 /// Load a statically-linked ELF from the given path.
 ///
@@ -21,102 +30,74 @@ pub fn load_elf(path: &str) -> Result<(usize, usize), isize> {
     // 1. Open the file
     let fid = ipc::fs_open(path)?;
 
-    // 2. Read ELF header (64 bytes)
-    let mut elf_hdr = [0u8; 64];
-    if ipc::fs_read(fid, &mut elf_hdr).is_err() {
+    // 2. Read ELF header + program headers into a contiguous buffer.
+    //    For a typical ELF (< 10 PH entries × 56 bytes), 2 KiB is plenty.
+    let mut buf = [0u8; 2048];
+    let n = ipc::fs_read(fid, &mut buf[..])?;
+    if n < 64 {
         ipc::fs_close(fid).ok();
         return Err(-1);
     }
 
-    if elf_hdr[0..4] != ELF_MAGIC {
-        ipc::fs_close(fid).ok();
-        return Err(-1);
-    }
+    let elf = ElfFile::new(&buf[..n]).map_err(|_| -1_isize)?;
+    let entry = elf.header.pt2.entry_point() as usize;
 
-    let entry = u64::from_le_bytes(elf_hdr[0x18..0x20].try_into().unwrap()) as usize;
-    let phoff = u64::from_le_bytes(elf_hdr[0x20..0x28].try_into().unwrap()) as usize;
-    let phentsize = u16::from_le_bytes(elf_hdr[0x36..0x38].try_into().unwrap()) as usize;
-    let phnum = u16::from_le_bytes(elf_hdr[0x38..0x3A].try_into().unwrap()) as usize;
-
-    // 3. Read program headers
-    let ph_size = phnum * phentsize;
-    // Seek to phoff
-    ipc::fs_lseek(fid, phoff as isize, 0 /* SEEK_SET */)?;
-
-    let mut ph_buf = [0u8; 512];
-    if ph_size > ph_buf.len() {
-        ipc::fs_close(fid).ok();
-        return Err(-1);
-    }
-    let n = ipc::fs_read(fid, &mut ph_buf[..ph_size])?;
-    if n < ph_size {
-        ipc::fs_close(fid).ok();
-        return Err(-1);
-    }
-
-    // 4. Map each PT_LOAD segment
+    // 3. Map each PT_LOAD segment
     let mut data_end: usize = 0;
 
-    for i in 0..phnum {
-        let off = i * phentsize;
-        let p_type = u32::from_le_bytes(ph_buf[off..off+4].try_into().unwrap());
-        if p_type != PT_LOAD { continue; }
+    for ph in elf.program_iter() {
+        if ph.get_type() != Ok(Type::Load) {
+            continue;
+        }
 
-        let p_flags  = u32::from_le_bytes(ph_buf[off+4..off+8].try_into().unwrap());
-        let p_offset = u64::from_le_bytes(ph_buf[off+8..off+16].try_into().unwrap()) as usize;
-        let p_vaddr  = u64::from_le_bytes(ph_buf[off+16..off+24].try_into().unwrap()) as usize;
-        let p_filesz = u64::from_le_bytes(ph_buf[off+32..off+40].try_into().unwrap()) as usize;
-        let p_memsz  = u64::from_le_bytes(ph_buf[off+40..off+48].try_into().unwrap()) as usize;
+        let vaddr  = ph.virtual_addr() as usize;
+        let memsz  = ph.mem_size() as usize;
+        let filesz = ph.file_size() as usize;
+        let offset = ph.offset() as usize;
+        let prot   = flags_to_prot(ph.flags());
 
-        // Build prot: bit0=READ, bit1=WRITE, bit2=EXEC
-        let mut prot: usize = 0;
-        if p_flags & PF_R != 0 { prot |= 1; }
-        if p_flags & PF_W != 0 { prot |= 2; }
-        if p_flags & PF_X != 0 { prot |= 4; }
+        let seg_end = vaddr + memsz;
+        if seg_end > data_end {
+            data_end = seg_end;
+        }
 
-        let seg_end = p_vaddr + p_memsz;
-        if seg_end > data_end { data_end = seg_end; }
-
-        let start_page = p_vaddr & !(PAGE_SIZE - 1);
-        let end_page = (p_vaddr + p_memsz + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let start_page = vaddr & !(PAGE_SIZE - 1);
+        let end_page = (seg_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
         for page_va in (start_page..end_page).step_by(PAGE_SIZE) {
-            // Map the page
+            // Map the page via kernel syscall
             let ret = unsafe { native::map_page(page_va, prot) };
             if ret < 0 {
                 ipc::fs_close(fid).ok();
                 return Err(ret);
             }
 
-            let page_off = page_va.wrapping_sub(p_vaddr);
-            let copy_start = page_off;
-            let copy_end = (page_off + PAGE_SIZE).min(p_filesz);
+            let page_end = page_va + PAGE_SIZE;
 
-            // Copy file data directly into the mapped page
-            if copy_start < p_filesz {
+            // Copy file data into this page
+            let copy_start = page_va.max(vaddr);
+            let copy_end = page_end.min(vaddr + filesz);
+            if copy_start < copy_end {
+                let file_pos = offset + (copy_start - vaddr);
                 let len = copy_end - copy_start;
-                if len > 0 {
-                    let file_pos = p_offset + copy_start;
-                    ipc::fs_lseek(fid, file_pos as isize, 0 /* SEEK_SET */)?;
-                    // Read directly into the page
-                    let dst = &mut unsafe { core::slice::from_raw_parts_mut(page_va as *mut u8, len) };
-                    ipc::fs_read(fid, dst)?;
-                }
+                ipc::fs_lseek(fid, file_pos as isize, 0 /* SEEK_SET */)?;
+                let dst = unsafe {
+                    core::slice::from_raw_parts_mut(copy_start as *mut u8, len)
+                };
+                ipc::fs_read(fid, dst)?;
+            }
 
-                // Zero the BSS portion
-                let zero_start = if page_off > p_filesz { 0 } else { p_filesz - page_off };
-                if zero_start < PAGE_SIZE {
-                    unsafe {
-                        core::ptr::write_bytes(
-                            (page_va + zero_start) as *mut u8,
-                            0,
-                            PAGE_SIZE - zero_start,
-                        );
-                    }
+            // Zero BSS portion
+            let bss_start = page_va.max(vaddr + filesz);
+            let bss_end = page_end.min(seg_end);
+            if bss_start < bss_end {
+                unsafe {
+                    core::ptr::write_bytes(
+                        bss_start as *mut u8,
+                        0,
+                        bss_end - bss_start,
+                    );
                 }
-            } else {
-                // Entire page is BSS
-                unsafe { core::ptr::write_bytes(page_va as *mut u8, 0, PAGE_SIZE); }
             }
         }
     }

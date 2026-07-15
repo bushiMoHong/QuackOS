@@ -18,6 +18,9 @@ pub struct TaskStruct {
     pub pid: u64,
     /// Exit code (set by exit / exit_group)
     pub exit_code: i32,
+    /// clear_child_tid pointer — kernel zeroes *clear_child_tid on thread exit.
+    /// Set by sys_set_tid_address (syscall 96).
+    pub clear_child_tid: usize,
 }
 
 impl TaskStruct {
@@ -28,6 +31,7 @@ impl TaskStruct {
             initial_brk,
             pid: 0,
             exit_code: 0,
+            clear_child_tid: 0,
         }
     }
 

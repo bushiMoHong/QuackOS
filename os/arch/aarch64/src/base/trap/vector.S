@@ -86,6 +86,16 @@ trap_return:
     ldr     x1, [sp, #16]
     msr     spsr_el1, x1
 
+    // If returning to EL0 (SPSR.M == 0), restore sp_el0 from tf.sp.
+    // The handler may have changed tf.sp (e.g. linux_syscall_done restores
+    // the original Linux binary's SP).  Without this, the user process
+    // resumes with the wrong stack pointer and function epilogues that
+    // reload x30 from the stack will branch to garbage.
+    and     x2, x1, #0xf           // extract SPSR.M (low 4 bits)
+    cbnz    x2, 1f                 // skip if not EL0t
+    ldr     x1, [sp, #24]          // tf.sp
+    msr     sp_el0, x1
+1:
     // 从固定偏移量恢复所有通用寄存器（此时 x1 将被稳稳地恢复为 0x2222）
     ldp     x1,  x2,  [sp, #40]
     ldp     x3,  x4,  [sp, #56]
@@ -132,15 +142,17 @@ __vectors:
 
 .global run_user
 run_user:
+    // Save kernel stack pointer BEFORE pushing callee-saved regs,
+    // so trap_from_user switches to a safe distance above TrapFrame.
+    mov     x1, sp
+    msr     tpidr_el1, x1
+
     stp     x29, x30, [sp, #-16]!
     stp     x27, x28, [sp, #-16]!
     stp     x25, x26, [sp, #-16]!
     stp     x23, x24, [sp, #-16]!
     stp     x21, x22, [sp, #-16]!
-    stp     x19, x20, [sp, #-16]!
-
-    mov     x1, sp
-    msr     tpidr_el1, x1             // 暂存内核栈
+    stp     x19, x20, [sp, #-16]!             // 暂存内核栈
 
     mov     sp, x0                    // 切换到用户上下文
 

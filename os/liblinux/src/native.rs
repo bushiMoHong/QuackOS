@@ -15,6 +15,7 @@ const SYS_EXIT_THREAD:            u64 = 7;
 const SYS_REGISTER_LINUX_HANDLER: u64 = 8;
 const SYS_LINUX_SYSCALL_DONE:     u64 = 9;
 const SYS_YIELD:                  u64 = 10;
+const SYS_CONSOLE_WRITE:         u64 = 11;
 
 /// Issue a native (SVC #1) syscall with up to 4 arguments.
 /// Returns x0.
@@ -77,12 +78,33 @@ pub unsafe fn exit_thread(code: usize) -> ! {
 }
 
 pub unsafe fn register_linux_handler(handler_pc: usize, save_area: usize) -> isize {
-    svc1(SYS_REGISTER_LINUX_HANDLER, handler_pc, save_area, 0, 0) as isize
+    // Explicitly set x0, x1, x8 inside the asm to eliminate any register-
+    // allocation uncertainty.  The ARM64 calling convention gives us
+    // handler_pc in x0 and save_area in x1 on entry to this function,
+    // but when the compiler inlines this into _start the values may be
+    // computed into arbitrary registers.  By doing the moves explicitly
+    // right before SVC we guarantee the kernel sees the right values.
+    let ret: usize;
+    asm!(
+        "mov x0, {h}",
+        "mov x1, {s}",
+        "mov x8, {n}",
+        "svc #1",
+        h = in(reg) handler_pc,
+        s = in(reg) save_area,
+        n = in(reg) SYS_REGISTER_LINUX_HANDLER,
+        lateout("x0") ret,
+    );
+    ret as isize
 }
 
 pub unsafe fn linux_syscall_done(ret_val: usize) -> ! {
     svc1(SYS_LINUX_SYSCALL_DONE, ret_val, 0, 0, 0);
     loop { asm!("wfi"); }
+}
+
+pub unsafe fn console_write(buf: *const u8, len: usize) -> isize {
+    svc1(SYS_CONSOLE_WRITE, buf as usize, len, 0, 0) as isize
 }
 
 pub unsafe fn yield_cpu() {
