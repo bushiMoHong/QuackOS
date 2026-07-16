@@ -54,6 +54,8 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
         9  => sys_linux_syscall_done(tf),
         10 => sys_yield(tf),
         11 => sys_console_write(tf),
+        12 => sys_mprotect(tf),
+        13 => sys_spawn(tf),
         _  => {
             tf.general.x0 = (-ENOSYS) as usize;
         }
@@ -400,11 +402,12 @@ fn sys_create_thread(tf: &mut TrapFrame) {
     //   0x00: lr,   0x08: x19,  0x10: x20,  0x18: x21
     //   0x20: x22,  0x28: x23,  0x30: x24,  0x38: x25
     //   0x40: x26,  0x48: x27,  0x50: x28,  0x58: fp
-    //   0x70: ttbr1_el1
+    //   0x70: ttbr1_el1,   0x78: ttbr0_el1
     unsafe {
         write_volatile((ctx_addr + 0x00) as *mut usize, thread_trampoline as *const () as usize); // lr
         write_volatile((ctx_addr + 0x08) as *mut usize, tcb_addr);                   // x19 = TCB ptr
         write_volatile((ctx_addr + 0x70) as *mut usize, 0u64 as usize);              // ttbr1_el1 = 0
+        write_volatile((ctx_addr + 0x78) as *mut usize, *crate::KERNEL_L0_PA.lock()); // ttbr0 = shared page table
     }
 
     // ── 5. Enqueue the new thread ──
@@ -575,6 +578,131 @@ fn sys_linux_syscall_done(tf: &mut TrapFrame) {
 fn sys_yield(tf: &mut TrapFrame) {
     crate::kernel::sche::schedule();
     tf.general.x0 = 0; // success (after we're scheduled back)
+}
+
+// ---------------------------------------------------------------------------
+// 12. sys_mprotect — change page permissions
+// ---------------------------------------------------------------------------
+fn sys_mprotect(tf: &mut TrapFrame) {
+    let vaddr = tf.general.x0;
+    let prot = tf.general.x1;
+
+    if vaddr & 0xFFF != 0 || vaddr >= 0x0000_8000_0000_0000 {
+        tf.general.x0 = (-EINVAL) as usize;
+        return;
+    }
+
+    let mut flags = aarch64::base::mm::page_table::PTEFlags::empty();
+    flags.insert(aarch64::base::mm::page_table::PTEFlags::V);
+    flags.insert(aarch64::base::mm::page_table::PTEFlags::A);
+    flags.insert(aarch64::base::mm::page_table::PTEFlags::D);
+    flags.insert(aarch64::base::mm::page_table::PTEFlags::U);
+    if prot & 1 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::R); }
+    if prot & 2 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::W); }
+    if prot & 4 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::X); }
+
+    let l0_pa = crate::KERNEL_L0_PA.lock();
+    let mut pt = aarch64::base::mm::page_table::PageTable::from_token(*l0_pa);
+    let vpn = aarch64::base::mm::VirtPageNum::from(vaddr >> 12);
+
+    match pt.find_pte(vpn) {
+        Some(_) => {
+            pt.remap(vpn, flags);
+            tf.general.x0 = 0;
+        }
+        None => {
+            tf.general.x0 = (-ENOMEM) as usize;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 13. sys_spawn — create an isolated process with its own address space
+// ---------------------------------------------------------------------------
+// args: x0 = elf_data_ptr (user-space ELF buffer)
+//       x1 = elf_len       (length in bytes)
+//       x2 = stack_top     (top of user stack)
+// returns: x0 = ThreadId on success / negative errno on failure
+fn sys_spawn(tf: &mut TrapFrame) {
+    use crate::kernel::bmm;
+    use crate::usr::proc::elf_loader;
+    use alloc::vec;
+
+    let elf_ptr  = tf.general.x0;
+    let elf_len  = tf.general.x1;
+    let stack_top = tf.general.x2;
+
+    // Validate arguments
+    if elf_len == 0 || elf_len > 1024 * 1024 {
+        tf.general.x0 = (-EINVAL) as usize;
+        return;
+    }
+    if stack_top & 0xF != 0 || stack_top >= 0x0000_8000_0000_0000 {
+        tf.general.x0 = (-EINVAL) as usize;
+        return;
+    }
+
+    // Copy ELF data from user space to kernel heap
+    let mut elf_buf = vec![0u8; elf_len as usize];
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            elf_ptr as *const u8,
+            elf_buf.as_mut_ptr(),
+            elf_len as usize,
+        );
+    }
+
+    // Create isolated page table with kernel identity mappings
+    let mut pt = match bmm::create_kernel_mapped_page_table() {
+        Ok(pt) => pt,
+        Err(_) => {
+            tf.general.x0 = (-ENOMEM) as usize;
+            return;
+        }
+    };
+
+    // Load ELF segments into the new page table
+    let loaded = match elf_loader::load_elf_bytes(&mut pt, &elf_buf) {
+        Ok(l) => l,
+        Err(_) => {
+            tf.general.x0 = (-EINVAL) as usize;
+            return;
+        }
+    };
+
+    // Map user stack
+    elf_loader::map_user_stack(&mut pt);
+
+    // Register in global AS table
+    let (asid, ttbr0) = match bmm::register_page_table(pt) {
+        Some((id, token)) => (id, token),
+        None => {
+            tf.general.x0 = (-ENOMEM) as usize;
+            return;
+        }
+    };
+
+    // Create initial thread in the new address space
+    let tid = match elf_loader::spawn_user_thread_in_as(
+        loaded.entry,
+        stack_top,
+        ttbr0,
+        asid.0,
+    ) {
+        Ok(tid) => tid,
+        Err(_) => {
+            bmm::unregister_address_space(asid);
+            tf.general.x0 = (-ENOMEM) as usize;
+            return;
+        }
+    };
+
+    // Full TLB flush so the new page table can be used
+    unsafe {
+        core::arch::asm!("dsb ish; tlbi vmalle1is; dsb ish; isb");
+    }
+
+    tf.general.x0 = tid.0 as usize;
 }
 
 // ---------------------------------------------------------------------------

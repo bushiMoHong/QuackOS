@@ -27,11 +27,13 @@
 use aarch64::base::mm::page_table::PageTable;
 use aarch64::base::mm::page_table::{tlb_invalidate, tlb_invalidate_addr};
 use aarch64::base::mm::page_table::PTEFlags;
+use aarch64::base::mm::page_table::PageTableEntry;
 use aarch64::base::mm::VirtAddr;
 use aarch64::base::mm::VirtPageNum;
 use aarch64::base::mm::PhysAddr;
 use aarch64::base::mm::PhysPageNum;
-use aarch64::base::mm::free_page;
+use aarch64::base::mm::{alloc_page, free_page};
+use aarch64::base::config::PAGE_SIZE;
 use spin::Mutex;
 
 use crate::kernel::trap::PageFaultCause;
@@ -334,4 +336,205 @@ pub enum MapError {
     OutOfMemory,
     /// Invalid argument (e.g., null pointer, bad alignment).
     InvalidArgument,
+}
+
+// ---------------------------------------------------------------------------
+// Kernel-mapped PageTable factory
+// ---------------------------------------------------------------------------
+
+/// Create a fresh PageTable with kernel identity mappings already installed.
+///
+/// The new table contains:
+/// - L0[0] → L1 table
+/// - L1[0] → L2_LO table
+/// - L1[1] = 1GB RAM block (identity maps PA 0x40000000-0x7FFFFFFF)
+/// - L2_LO device blocks for UART (0x09000000) and VirtIO (0x0A000000)
+///
+/// User-space pages (L2_LO[0]-L2_LO[0x47]) start empty.
+/// All intermediate pages are tracked via `PageTable::track_frame` and
+/// will be freed when the PageTable is dropped.
+pub fn create_kernel_mapped_page_table() -> Result<PageTable, MapError> {
+    let mut pt = PageTable::new();
+
+    // Allocate L1 table
+    let l1_pa = alloc_page().ok_or(MapError::OutOfMemory)?;
+    let mut l1_ppn = PhysPageNum::from(l1_pa >> 12);
+    unsafe { core::ptr::write_bytes((l1_pa) as *mut u8, 0, PAGE_SIZE); }
+    pt.track_frame(l1_ppn);
+
+    // L0[0] → table descriptor for L1
+    let mut root_ppn = pt.root_ppn;
+    let root_table = unsafe { root_ppn.get_pte_array_mut() };
+    root_table[0] = PageTableEntry::new_table(l1_ppn);
+
+    // Allocate L2_LO table
+    let l2_lo_pa = alloc_page().ok_or(MapError::OutOfMemory)?;
+    let mut l2_lo_ppn = PhysPageNum::from(l2_lo_pa >> 12);
+    unsafe { core::ptr::write_bytes((l2_lo_pa) as *mut u8, 0, PAGE_SIZE); }
+    pt.track_frame(l2_lo_ppn);
+
+    // L1[0] → table descriptor for L2_LO
+    let l1_table = unsafe { l1_ppn.get_pte_array_mut() };
+    l1_table[0] = PageTableEntry::new_table(l2_lo_ppn);
+
+    // L1[1] = 1GB RAM block (identity map 0x40000000-0x7FFFFFFF)
+    l1_table[1] = PageTableEntry {
+        bits: (0x40000000usize)
+            | (2 << 2)     // AttrIndx 2 = normal WB
+            | (1 << 5)     // NS
+            | (0b11 << 8)  // inner shareable
+            | (0b00 << 6)  // AP = EL1 RW, EL0 RW
+            | (1 << 10)    // AF
+            | (1 << 54)    // UXN
+            | 0b01,        // block, valid
+    };
+
+    // Copy device block entries from kernel L2_LO
+    let kernel_l2_lo_pa = *crate::KERNEL_L2_LOW_PA.lock();
+    let kernel_l2_lo = unsafe {
+        &*(kernel_l2_lo_pa as *const [u64; 512])
+    };
+    let our_l2_lo = unsafe { l2_lo_ppn.get_pte_array_mut() };
+
+    // Copy the exact PTE values from the kernel table
+    our_l2_lo[0x48] = PageTableEntry { bits: kernel_l2_lo[0x48] as usize };
+    our_l2_lo[0x50] = PageTableEntry { bits: kernel_l2_lo[0x50] as usize };
+
+    Ok(pt)
+}
+
+// ---------------------------------------------------------------------------
+// Global address-space table
+// ---------------------------------------------------------------------------
+
+const MAX_AS: usize = 128;
+
+struct AsEntry {
+    id: AddressSpaceId,
+    page_table: PageTable,
+    generation: u16,
+}
+
+struct AsTable {
+    slots: [Option<AsEntry>; MAX_AS],
+    count: usize,
+    generations: [u16; MAX_AS],
+}
+
+impl AsTable {
+    const fn new() -> Self {
+        AsTable {
+            slots: [const { None }; MAX_AS],
+            count: 0,
+            generations: [0; MAX_AS],
+        }
+    }
+
+    fn alloc(&mut self, pt: PageTable) -> Option<AddressSpaceId> {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.is_none() {
+                let gen = if self.generations[i] == 0 { 1 }
+                          else { self.generations[i].wrapping_add(1) };
+                self.generations[i] = gen;
+                let id = AddressSpaceId(((gen as usize) << 16) | i);
+                *slot = Some(AsEntry { id, page_table: pt, generation: gen });
+                self.count += 1;
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    fn free(&mut self, id: AddressSpaceId) -> Option<PageTable> {
+        let idx = id.0 & 0xFFFF;
+        if idx >= MAX_AS { return None; }
+        let entry = self.slots[idx].take()?;
+        if entry.id != id {
+            self.slots[idx] = Some(entry);
+            return None;
+        }
+        self.count -= 1;
+        Some(entry.page_table)
+    }
+
+    fn get_mut(&mut self, id: AddressSpaceId) -> Option<&mut AsEntry> {
+        let idx = id.0 & 0xFFFF;
+        let slot = self.slots.get_mut(idx)?;
+        slot.as_mut().filter(|e| e.id == id)
+    }
+}
+
+pub static AS_TABLE: Mutex<AsTable> = Mutex::new(AsTable::new());
+
+/// Allocate a new address space with kernel identity mappings.
+pub fn create_address_space() -> Result<AddressSpaceId, MapError> {
+    let pt = create_kernel_mapped_page_table()?;
+    AS_TABLE.lock().alloc(pt).ok_or(MapError::OutOfMemory)
+}
+
+/// Register a pre-built PageTable into the AS table.
+///
+/// Returns the newly allocated `AddressSpaceId` together with the TTBR0 token.
+/// The PageTable is moved into the table and must not be used afterwards.
+pub fn register_page_table(pt: PageTable) -> Option<(AddressSpaceId, usize)> {
+    let mut table = AS_TABLE.lock();
+    let id = table.alloc(pt)?;
+    let ttbr0 = table.get_mut(id).unwrap().page_table.token();
+    Some((id, ttbr0))
+}
+
+/// Remove an address space from the table, freeing its page-table pages.
+/// Does nothing if the ASID does not exist.
+pub fn unregister_address_space(id: AddressSpaceId) {
+    let mut table = AS_TABLE.lock();
+    table.free(id);
+}
+
+/// Destroy an address space, freeing all its page-table pages.
+pub fn destroy_address_space(id: AddressSpaceId) -> Result<(), MapError> {
+    let mut table = AS_TABLE.lock();
+    let _pt = table.free(id).ok_or(MapError::InvalidArgument)?;
+    // PageTable Drop frees all tracked pages
+    Ok(())
+}
+
+/// Get the TTBR0 token (physical page-table root) for `id`.
+pub fn get_ttbr0(id: AddressSpaceId) -> Option<usize> {
+    let mut table = AS_TABLE.lock();
+    table.get_mut(id).map(|e| e.page_table.token())
+}
+
+/// Execute a closure with mutable access to an address space's PageTable.
+pub fn with_page_table_mut<R>(
+    id: AddressSpaceId,
+    f: impl FnOnce(&mut PageTable) -> R,
+) -> Option<R> {
+    let mut table = AS_TABLE.lock();
+    let entry = table.get_mut(id)?;
+    Some(f(&mut entry.page_table))
+}
+
+/// Map a page into a specific address space (allocating a physical page).
+/// Similar to sys_map_page but targets a specific AS.
+pub fn map_page_in_as(
+    asid: AddressSpaceId,
+    vaddr: usize,
+    paddr: usize,
+    prot: u16,
+) -> Result<(), MapError> {
+    let va = VirtAddr::from(vaddr);
+    let vpn = VirtPageNum::from(va.floor());
+    let ppn = PhysPageNum::from(PhysAddr::from(paddr));
+
+    let mut flags = crate::kernel::bmm::MapFlags::empty();
+    flags.0 |= MapFlags::USER;
+    if prot & 1 != 0 { flags.0 |= MapFlags::READ; }
+    if prot & 2 != 0 { flags.0 |= MapFlags::WRITE; }
+    if prot & 4 != 0 { flags.0 |= MapFlags::EXEC; }
+
+    let pte_flags = flags.to_pte_flags();
+    let mut table = AS_TABLE.lock();
+    let entry = table.get_mut(asid).ok_or(MapError::InvalidArgument)?;
+    entry.page_table.map(vpn, ppn, pte_flags);
+    Ok(())
 }

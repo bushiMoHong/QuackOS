@@ -162,3 +162,57 @@ pub fn sys_fstat(task: &mut TaskStruct, fd: usize, statbuf_ptr: usize) -> u64 {
         (-errno::EBADF as u64)
     }
 }
+
+/// lseek(fd, offset, whence) — syscall 62
+pub fn sys_lseek(task: &mut TaskStruct, fd: usize, offset: isize, whence: usize) -> u64 {
+    if let Some(fid) = task.fd_table.get(fd) {
+        match ipc::fs_lseek(fid, offset, whence as u8) {
+            Ok(pos) => pos as u64,
+            Err(e) => (-e as u64),
+        }
+    } else {
+        (-errno::EBADF as u64)
+    }
+}
+
+/// dup(oldfd) — syscall 23
+/// For now, just return the same fd (no real duplication).
+pub fn sys_dup(task: &TaskStruct, oldfd: usize) -> u64 {
+    if task.fd_table.get(oldfd).is_some() {
+        oldfd as u64
+    } else {
+        (-errno::EBADF as u64)
+    }
+}
+
+/// fcntl(fd, cmd, arg) — syscall 25 (stub)
+pub fn sys_fcntl(task: &mut TaskStruct, fd: usize, cmd: usize, arg: usize) -> u64 {
+    match cmd {
+        // F_DUPFD (0) — duplicate fd
+        0 => {
+            if task.fd_table.get(fd).is_some() {
+                // Find a free fd >= arg and dup there
+                for newfd in arg..1024 {
+                    if task.fd_table.get(newfd).is_none() {
+                        if let Some(fid) = task.fd_table.get(fd) {
+                            task.fd_table.alloc(fid, 0);
+                            return newfd as u64;
+                        }
+                    }
+                }
+                (-errno::EMFILE as u64)
+            } else {
+                (-errno::EBADF as u64)
+            }
+        }
+        // F_GETFD (1) — get file descriptor flags
+        1 => 0,
+        // F_SETFD (2) — set file descriptor flags (ignore)
+        2 => 0,
+        // F_GETFL (3) — get file status flags
+        3 => 0, // O_RDONLY
+        // F_SETFL (4) — set file status flags (ignore)
+        4 => 0,
+        _ => (-errno::EINVAL as u64),
+    }
+}

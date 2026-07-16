@@ -429,14 +429,72 @@ pub fn spawn_user_thread(entry: usize, stack_top: usize) -> Result<sche::ThreadI
     // Build TaskContext on the kernel stack
     let tcb_addr = unsafe { sche::tcb_ptr(tid) } as usize;
     let ttbr1: usize;
-    unsafe { core::arch::asm!("mrs {}, ttbr1_el1", out(reg) ttbr1); }
+    let ttbr0: usize;
+    unsafe {
+        core::arch::asm!(
+            "mrs {t1}, ttbr1_el1",
+            "mrs {t0}, ttbr0_el1",
+            t1 = out(reg) ttbr1,
+            t0 = out(reg) ttbr0,
+        );
+    }
     unsafe {
         write_volatile((ctx_addr + 0x00) as *mut usize, thread_trampoline_addr());
         write_volatile((ctx_addr + 0x08) as *mut usize, tcb_addr);
         write_volatile((ctx_addr + 0x70) as *mut usize, ttbr1);
+        write_volatile((ctx_addr + 0x78) as *mut usize, ttbr0);
     }
 
     // Enqueue
+    let prio = sche::with_thread(tid, |t| t.effective_priority()).unwrap_or(128);
+    sche::enqueue_ready(tid, prio).map_err(|_| "Failed to enqueue thread")?;
+
+    Ok(tid)
+}
+
+/// Spawn a user-mode thread in a specific (isolated) address space.
+///
+/// Like `spawn_user_thread`, but uses the caller-supplied `ttbr0` and
+/// `asid` instead of the shared kernel page table.
+pub fn spawn_user_thread_in_as(
+    entry: usize,
+    stack_top: usize,
+    ttbr0: usize,
+    asid: usize,
+) -> Result<sche::ThreadId, &'static str> {
+    let ks_pa0 = alloc_page().ok_or("OOM for kernel stack page 0")?;
+    let ks_pa1 = alloc_page().ok_or("OOM for kernel stack page 1")?;
+    let ks_base = ks_pa0;
+    let ks_top = ks_pa1 + PAGE_SIZE;
+    unsafe { core::ptr::write_bytes(ks_pa0 as *mut u8, 0, KERNEL_STACK_SIZE); }
+
+    let ctx_addr = ks_top - 128;
+    let tf_addr = ctx_addr - 288;
+    let initial_sp = stack_top - 16;
+
+    let trapframe = TrapFrame {
+        trap_num: 0,
+        elr: entry,
+        spsr: 0,
+        sp: initial_sp,
+        tpidr: 0,
+        general: GeneralRegs { x0: 0, ..Default::default() },
+    };
+    unsafe { write_volatile(tf_addr as *mut TrapFrame, trapframe); }
+
+    let tid = unsafe {
+        sche::create_thread(128, ks_base, ctx_addr, ttbr0 as usize, asid)
+    }
+    .map_err(|_| "Failed to create thread in AS")?;
+
+    let tcb_addr = unsafe { sche::tcb_ptr(tid) } as usize;
+    unsafe {
+        write_volatile((ctx_addr + 0x00) as *mut usize, thread_trampoline_addr());
+        write_volatile((ctx_addr + 0x08) as *mut usize, tcb_addr);
+        write_volatile((ctx_addr + 0x70) as *mut usize, 0usize);  // ttbr1 = 0
+        write_volatile((ctx_addr + 0x78) as *mut usize, ttbr0);   // isolated page table
+    }
+
     let prio = sche::with_thread(tid, |t| t.effective_priority()).unwrap_or(128);
     sche::enqueue_ready(tid, prio).map_err(|_| "Failed to enqueue thread")?;
 

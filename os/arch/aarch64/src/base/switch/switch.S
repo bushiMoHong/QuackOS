@@ -19,7 +19,7 @@
 //   0x60     (reserved)
 //   0x68     (reserved)
 //   0x70     ttbr1_el1        – kernel page-table root
-//   0x78     (reserved)
+//   0x78     ttbr0_el1        – user page-table root
 //
 // Convention:
 //   x19           = current-task TCB pointer (points to struct where
@@ -50,6 +50,10 @@ __switch:
     mrs  x9, ttbr1_el1
     str  x9, [sp, #0x70]
 
+    //    Save user page-table root at slot 15 (0x78)
+    mrs  x9, ttbr0_el1
+    str  x9, [sp, #0x78]
+
     // 3.  Write current SP into TCB (x19 points to the TCB; TCB[0] = sp)
     //     A64 does not allow SP as a source register for STR; bounce
     //     through a temporary general-purpose register.
@@ -69,7 +73,11 @@ __switch:
     //    Restore TTBR1_EL1
     ldr  x9, [x0, #0x70]
     msr  ttbr1_el1, x9
-    //    Barrier required after TTBR write
+
+    //    Restore TTBR0_EL1
+    ldr  x9, [x0, #0x78]
+    msr  ttbr0_el1, x9
+    //    Barrier required after TTBR writes
     dsb  ish
     isb
     //    Invalidate entire TLB for the new ASID/VMID context

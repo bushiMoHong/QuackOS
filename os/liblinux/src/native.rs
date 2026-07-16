@@ -16,6 +16,7 @@ const SYS_REGISTER_LINUX_HANDLER: u64 = 8;
 const SYS_LINUX_SYSCALL_DONE:     u64 = 9;
 const SYS_YIELD:                  u64 = 10;
 const SYS_CONSOLE_WRITE:         u64 = 11;
+const SYS_MPROTECT:              u64 = 12;
 
 /// Issue a native (SVC #1) syscall with up to 4 arguments.
 /// Returns x0.
@@ -105,6 +106,10 @@ pub unsafe fn linux_syscall_done(ret_val: usize) -> ! {
 
 pub unsafe fn console_write(buf: *const u8, len: usize) -> isize {
     svc1(SYS_CONSOLE_WRITE, buf as usize, len, 0, 0) as isize
+}
+
+pub unsafe fn mprotect_page(vaddr: usize, prot: usize) -> isize {
+    svc1(SYS_MPROTECT, vaddr, prot, 0, 0) as isize
 }
 
 pub unsafe fn yield_cpu() {

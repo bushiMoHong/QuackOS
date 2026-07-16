@@ -24,8 +24,9 @@ use crate::print_uart_hex;
 use aarch64::base::mm::page_table::PageTable;
 
 use crate::usr::proc::elf_loader::{
-    load_elf_bytes, map_user_stack, spawn_user_thread, USER_STACK_TOP,
+    load_elf_bytes, map_user_stack, spawn_user_thread_in_as, USER_STACK_TOP,
 };
+use crate::kernel::bmm::{self, create_kernel_mapped_page_table};
 
 // ---------------------------------------------------------------------------
 // Embedded liblinux ELF (built by Makefile before the kernel)
@@ -88,10 +89,11 @@ pub fn run_init() -> ! {
     print_uart("Ext4 filesystem mounted\n");
 
     // ------------------------------------------------------------------
-    // 2. Load liblinux ELF from embedded bytes
+    // 2. Create isolated page table and load liblinux ELF
     // ------------------------------------------------------------------
-    let mut pt = kernel_page_table();
-    print_uart("Loading liblinux from embedded ELF (");
+    let mut pt = create_kernel_mapped_page_table()
+        .expect("Failed to create isolated page table");
+    print_uart("Isolated page table created, loading liblinux from embedded ELF (");
     print_uart_hex(LIBLINUX_ELF.len() as u64);
     print_uart(" bytes)...\n");
 

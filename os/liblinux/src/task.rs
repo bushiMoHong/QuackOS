@@ -21,6 +21,10 @@ pub struct TaskStruct {
     /// clear_child_tid pointer — kernel zeroes *clear_child_tid on thread exit.
     /// Set by sys_set_tid_address (syscall 96).
     pub clear_child_tid: usize,
+    /// PR_SET_NO_NEW_PRIVS flag
+    pub no_new_privs: bool,
+    /// Next free virtual address for mmap (simple bump allocator).
+    pub mmap_base: usize,
 }
 
 impl TaskStruct {
@@ -32,6 +36,8 @@ impl TaskStruct {
             pid: 0,
             exit_code: 0,
             clear_child_tid: 0,
+            no_new_privs: false,
+            mmap_base: 0x0001_0000_0000, // 4 GB, well above program segments
         }
     }
 

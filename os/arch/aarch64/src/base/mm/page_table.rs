@@ -308,8 +308,9 @@ pub struct PageTable {
 }
 
 impl PageTable {
-    /// 记录一个新的中间页表帧
-    fn track_frame(&mut self, ppn: PhysPageNum) {
+    /// Register a newly-allocated intermediate page table frame so it is freed
+    /// when the PageTable is dropped.
+    pub fn track_frame(&mut self, ppn: PhysPageNum) {
         if self.tracker_head.is_none() {
             // 分配第一个 TrackerPage
             let tp_pa = alloc_page().expect("OOM tracking frame");
@@ -449,6 +450,45 @@ impl PageTable {
             ppn = next_ppn;
         }
         None
+    }
+
+    /// Walk the page table to find or create a PTE at the given level.
+    ///
+    /// Intermediate tables are allocated on-demand (as in `find_pte_create`).
+    /// `target_level` is the desired walk depth:
+    ///   0 = L0 (root), 1 = L1, 2 = L2, 3 = L3 (leaf).
+    ///
+    /// Returns `None` if memory allocation fails.
+    pub fn get_entry_at_level_mut(
+        &mut self,
+        vpn: VirtPageNum,
+        target_level: usize,
+    ) -> Option<&mut PageTableEntry> {
+        let idxs = vpn.indexes();
+        let mut ppn = self.root_ppn;
+
+        for (i, &idx) in idxs.iter().enumerate() {
+            let table = unsafe { ppn.get_pte_array_mut() };
+            let entry = &mut table[idx];
+
+            if i == target_level {
+                return Some(unsafe { &mut *(entry as *mut PageTableEntry) });
+            }
+
+            // Intermediate level — ensure table descriptor exists
+            if !entry.is_valid() {
+                let pa = alloc_page()?;
+                let va = PhysAddr::from(pa).to_kernel_virt().0;
+                unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096); }
+                let new_ppn = PhysPageNum::from(pa >> PAGE_SHIFT);
+                *entry = PageTableEntry::new_table(new_ppn);
+                self.track_frame(new_ppn);
+            }
+
+            let next_ppn = PhysPageNum::from((entry.bits >> PAGE_SHIFT) & ((1 << 36) - 1));
+            ppn = next_ppn;
+        }
+        None // walked past target_level
     }
 
     /// Walk the page table to find an existing leaf PTE for `vpn`.

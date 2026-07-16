@@ -13,14 +13,17 @@
 mod errno;
 mod fd_table;
 mod fs;
+mod futex;
 mod ipc;
 mod loader;
 mod misc;
 mod mm;
 mod native;
 mod proc;
+mod signal;
 mod syscall;
 mod task;
+mod time;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
