@@ -21,8 +21,6 @@ use crate::usr::fs::types::OpenFlags;
 use crate::print_uart;
 use crate::print_uart_hex;
 
-use aarch64::base::mm::page_table::PageTable;
-
 use crate::usr::proc::elf_loader::{
     load_elf_bytes, map_user_stack, spawn_user_thread_in_as, USER_STACK_TOP,
 };
@@ -55,15 +53,6 @@ struct BootInfo {
     phdr_addr: u64,
     phent_size: u64,
     phnum: u64,
-}
-
-// ---------------------------------------------------------------------------
-// Page-table helpers
-// ---------------------------------------------------------------------------
-
-fn kernel_page_table() -> PageTable {
-    let l0_pa = *crate::KERNEL_L0_PA.lock();
-    PageTable::from_token(l0_pa)
 }
 
 // ---------------------------------------------------------------------------
@@ -136,8 +125,11 @@ pub fn run_init() -> ! {
     print_uart("\n");
 
     // ------------------------------------------------------------------
-    // 5. Write BootInfo for liblinux
+    // 5. Write BootInfo for liblinux via physical address
+    //    (the isolated PT holds the mapping, not the current shared PT)
     // ------------------------------------------------------------------
+    use aarch64::base::mm::VirtAddr;
+
     let bootinfo = BootInfo {
         program_entry: bash.entry as u64,
         stack_top: USER_STACK_TOP as u64,
@@ -146,16 +138,23 @@ pub fn run_init() -> ! {
         phent_size: bash.phent_size as u64,
         phnum: bash.phnum as u64,
     };
+
+    // Translate BOOTINFO_ADDR in the isolated PT to a physical address,
+    // then write through the kernel identity mapping (phys == virt).
+    let boot_pa = pt.translate_va_to_pa(VirtAddr::from(BOOTINFO_ADDR))
+        .expect("BOOTINFO_ADDR not mapped in isolated AS");
     unsafe {
-        core::ptr::write_volatile(BOOTINFO_ADDR as *mut BootInfo, bootinfo);
+        core::ptr::write_volatile(boot_pa as *mut BootInfo, bootinfo);
     }
     unsafe { asm!("dsb ishst"); }
 
-    // Verify from kernel side
-    let verify = unsafe { core::ptr::read_volatile(BOOTINFO_ADDR as *const BootInfo) };
-    print_uart("BootInfo written at ");
+    // Verify by reading back through the physical address
+    let verify = unsafe { core::ptr::read_volatile(boot_pa as *const BootInfo) };
+    print_uart("BootInfo written at PA=");
+    print_uart_hex(boot_pa as u64);
+    print_uart(" (VA=");
     print_uart_hex(BOOTINFO_ADDR as u64);
-    print_uart(" entry=");
+    print_uart(") entry=");
     print_uart_hex(verify.program_entry);
     print_uart(" stack=");
     print_uart_hex(verify.stack_top);
@@ -164,20 +163,26 @@ pub fn run_init() -> ! {
     print_uart("\n");
 
     // ------------------------------------------------------------------
-    // 6. TLB flush — ensure all new user mappings are visible
+    // 6. Register the isolated address space
     // ------------------------------------------------------------------
+    let (asid, ttbr0) = bmm::register_page_table(pt)
+        .expect("Failed to register page table");
+    print_uart("Address space registered (asid=");
+    print_uart_hex(asid.0 as u64);
+    print_uart(" ttbr0=");
+    print_uart_hex(ttbr0 as u64);
+    print_uart(")\n");
+
+    // Flush TLB so the isolated AS is ready
     unsafe {
-        let l0_pa = *crate::KERNEL_L0_PA.lock();
-        asm!("msr ttbr0_el1, {}", in(reg) l0_pa);
-        asm!("dsb ish; isb");
-        asm!("tlbi vmalle1is; dsb ish; isb");
+        asm!("dsb ish; tlbi vmalle1is; dsb ish; isb");
     }
     print_uart("TLB done\n");
 
     // ------------------------------------------------------------------
-    // 7. Spawn liblinux user thread
+    // 7. Spawn liblinux in the isolated address space
     // ------------------------------------------------------------------
-    let tid = spawn_user_thread(liblinux.entry, USER_STACK_TOP)
+    let tid = spawn_user_thread_in_as(liblinux.entry, USER_STACK_TOP, ttbr0, asid.0)
         .expect("Failed to spawn liblinux thread");
     print_uart("liblinux thread spawned (tid=");
     print_uart_hex(tid.0 as u64);
