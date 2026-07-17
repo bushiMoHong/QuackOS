@@ -144,7 +144,12 @@ __vectors:
 run_user:
     // Save kernel stack pointer BEFORE pushing callee-saved regs,
     // so trap_from_user switches to a safe distance above TrapFrame.
+    //
+    // Subtract 1024 to leave headroom — trap_handler's call chain
+    // (handle_user_sync → reflect_linux_syscall → etc.) needs stack
+    // space WITHOUT overwriting the TrapFrame placed just below.
     mov     x1, sp
+    sub     x1, x1, #1024
     msr     tpidr_el1, x1
 
     stp     x29, x30, [sp, #-16]!

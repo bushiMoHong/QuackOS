@@ -89,7 +89,7 @@ impl IpcBuffer {
         }
         Some(ShortPayload {
             words,
-            len: word_count as u8,
+            len: (word_count * word_size) as u8,
         })
     }
 }

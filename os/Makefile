@@ -31,8 +31,9 @@ all: arm
 arm: $(LIBLINUX_ELF)
 	cargo build --target $(ARCH) --release
 
-# Build liblinux as a standalone user-space binary
-$(LIBLINUX_ELF):
+# Build liblinux as a standalone user-space binary (always rebuild)
+.PHONY: _build_liblinux
+$(LIBLINUX_ELF): _build_liblinux
 	cd $(LIBLINUX_DIR) && cargo build --target $(ARCH) --release
 
 # ---- Run ----

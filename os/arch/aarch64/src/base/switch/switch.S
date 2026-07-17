@@ -5,7 +5,7 @@
 //   Offset   Content
 //   ------   -------
 //   0x00     lr  (x30)       – return address
-//   0x08     x19              – current-task TCB pointer (== RISC-V "tp")
+//   0x08     x19              – current-task TCB pointer
 //   0x10     x20              – callee-saved
 //   0x18     x21
 //   0x20     x22
@@ -21,24 +21,22 @@
 //   0x70     ttbr1_el1        – kernel page-table root
 //   0x78     ttbr0_el1        – user page-table root
 //
-// Convention:
-//   x19           = current-task TCB pointer (points to struct where
+// Arguments:
+//   x0            = current task TCB pointer (points to struct where
 //                    offset 0 holds the saved kernel stack pointer).
-//   x0            = argument: `next_task_kernel_stack` — points to the
+//   x1            = next_task_kernel_stack — points to the
 //                    **saved context area** of the next task on its stack.
 //
-// After the switch x19 points to the **next** task's TCB; `ret` jumps
-// to the lr value that was stored in its context (so the next task
-// resumes right after its own last call to __switch).
+// On return, x0 holds next_sp so that thread_trampoline can locate
+// the TrapFrame (TrapFrame is at x0 - 288).
 
 .section .text
 .globl __switch
 
 __switch:
-    // 1.  Allocate the context area on the current kernel stack
+    // ── 1. Save current context ───────────────────────────────────────────
     sub  sp, sp, #128
 
-    // 2.  Save callee-saved registers (x19–x30) using store-pair
     stp  lr,  x19, [sp, #0x00]
     stp  x20, x21, [sp, #0x10]
     stp  x22, x23, [sp, #0x20]
@@ -46,48 +44,43 @@ __switch:
     stp  x26, x27, [sp, #0x40]
     stp  x28, fp,  [sp, #0x50]
 
-    //    Save kernel page-table root at slot 14 (0x70)
     mrs  x9, ttbr1_el1
     str  x9, [sp, #0x70]
 
-    //    Save user page-table root at slot 15 (0x78)
     mrs  x9, ttbr0_el1
     str  x9, [sp, #0x78]
 
-    // 3.  Write current SP into TCB (x19 points to the TCB; TCB[0] = sp)
-    //     A64 does not allow SP as a source register for STR; bounce
-    //     through a temporary general-purpose register.
+    //    Store current SP → current TCB.kernel_stack_top (offset 0)
     mov  x10, sp
-    str  x10, [x19]
+    str  x10, [x0]
 
-    // ----  Now x0 points to the next task's saved context  ----
+    // ── 2. Restore next context ───────────────────────────────────────────
+    ldp  lr,  x19, [x1, #0x00]
+    ldp  x20, x21, [x1, #0x10]
+    ldp  x22, x23, [x1, #0x20]
+    ldp  x24, x25, [x1, #0x30]
+    ldp  x26, x27, [x1, #0x40]
+    ldp  x28, fp,  [x1, #0x50]
 
-    // 4.  Restore callee-saved registers from next context
-    ldp  lr,  x19, [x0, #0x00]
-    ldp  x20, x21, [x0, #0x10]
-    ldp  x22, x23, [x0, #0x20]
-    ldp  x24, x25, [x0, #0x30]
-    ldp  x26, x27, [x0, #0x40]
-    ldp  x28, fp,  [x0, #0x50]
-
-    //    Restore TTBR1_EL1
-    ldr  x9, [x0, #0x70]
-    msr  ttbr1_el1, x9
-
-    //    Restore TTBR0_EL1
-    ldr  x9, [x0, #0x78]
-    msr  ttbr0_el1, x9
-    //    Barrier required after TTBR writes
-    dsb  ish
-    isb
-    //    Invalidate entire TLB for the new ASID/VMID context
+    // ── 3. Switch page tables ─────────────────────────────────────────────
     tlbi vmalle1is
     dsb  ish
     isb
 
-    // 5.  Set SP to the top of the next task's context area on its stack
-    //     (x0 + 128 = next-task SP after its context was saved)
-    add  sp, x0, #128
+    //    Restore TTBR1 (kernel page table root)
+    ldr  x9, [x1, #0x70]
+    msr  ttbr1_el1, x9
 
-    // 6.  Return — lr now holds next task's saved return address
+    //    Restore TTBR0 (user / isolation page table root)
+    ldr  x9, [x1, #0x78]
+    msr  ttbr0_el1, x9
+    isb
+
+    // ── 4. Set up the new thread's environment ────────────────────────────
+    //    x0 = next_sp  (needed by thread_trampoline)
+    mov  x0, x1
+
+    //    sp = next context + 128 = next thread's stack top
+    add  sp, x1, #128
+
     ret

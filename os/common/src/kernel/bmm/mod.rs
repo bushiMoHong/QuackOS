@@ -404,6 +404,114 @@ pub fn create_kernel_mapped_page_table() -> Result<PageTable, MapError> {
 }
 
 // ---------------------------------------------------------------------------
+// Clone user-space mappings from one PageTable to another
+// ---------------------------------------------------------------------------
+
+/// Copy every mapped user page from `src` to `dst` with fresh physical pages.
+///
+/// Walks L2_LO[0..0x48) (VA 0x0 through 0x8F_FFFF), and for each valid L3
+/// page or L2 block, allocates a new physical page, copies the data, and maps
+/// it at the same VA with the same permission flags.
+///
+/// Kernel identity mappings (L1[1]) and device blocks (L2_LO[0x48], [0x50])
+/// are left untouched — `dst` is assumed to already contain them (i.e. was
+/// created via `create_kernel_mapped_page_table`).
+pub fn clone_user_mappings(
+    src: &PageTable,
+    dst: &mut PageTable,
+) -> Result<(), MapError> {
+    // Read src L2_LO table: L0[0] → L1 → L1[0] → L2_LO
+    let l2_lo_ppn = get_l2_lo_ppn(src).ok_or(MapError::InvalidArgument)?;
+
+    for l2_idx in 0..0x48usize {
+        let l2_bits = unsafe { read_pte_raw(l2_lo_ppn, l2_idx) };
+        if l2_bits & 1 == 0 {
+            continue; // not valid
+        }
+
+        let is_table = (l2_bits >> 1) & 1 == 1;
+
+        if is_table {
+            let l3_ppn = PhysPageNum::from((l2_bits >> 12) & ((1usize << 36) - 1));
+            for l3_idx in 0..512 {
+                let l3_bits = unsafe { read_pte_raw(l3_ppn, l3_idx) };
+                if l3_bits & 1 == 0 {
+                    continue;
+                }
+
+                let src_pa = (l3_bits >> 12) << 12; // output address (bits [47:12])
+                let dst_pa = alloc_page().ok_or(MapError::OutOfMemory)?;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (src_pa & 0x0000_FFFF_FFFF_F000) as *const u8,
+                        dst_pa as *mut u8,
+                        PAGE_SIZE,
+                    );
+                }
+
+                let va = (l2_idx << 21) | (l3_idx << 12);
+                let vpn = VirtPageNum::from(va >> 12);
+                let ppn = PhysPageNum::from(dst_pa >> 12);
+
+                // Reconstruct PTEFlags from the source L3 PTE bits.
+                let pte = PageTableEntry { bits: l3_bits };
+                dst.map(vpn, ppn, pte.flags());
+            }
+        } else {
+            // L2 block entry (2 MiB).  Rare with the current loader, but handle
+            // it for correctness.  Allocate 512 × 4 KiB pages independently so
+            // the destination stays page-granular for later CoW or mprotect.
+            let src_base = (l2_bits >> 12) << 12;
+            let block_pte = PageTableEntry { bits: l2_bits };
+            let flags = block_pte.flags();
+
+            for i in 0..512 {
+                let dst_pa = alloc_page().ok_or(MapError::OutOfMemory)?;
+                let offset = i * PAGE_SIZE;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        ((src_base & 0x0000_FFFF_FFFF_F000) + offset) as *const u8,
+                        dst_pa as *mut u8,
+                        PAGE_SIZE,
+                    );
+                }
+                let va = (l2_idx << 21) | (i << 12);
+                let vpn = VirtPageNum::from(va >> 12);
+                let ppn = PhysPageNum::from(dst_pa >> 12);
+                dst.map(vpn, ppn, flags);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Read a raw u64 PTE from a page table at the given index.
+#[inline]
+unsafe fn read_pte_raw(ppn: PhysPageNum, idx: usize) -> usize {
+    let pa = PhysAddr::from(ppn).0;
+    let table = &*(pa as *const [usize; 512]);
+    table[idx]
+}
+
+/// Walk L0[0] → L1 → L1[0] → L2_LO and return the PhysPageNum of the L2_LO table.
+fn get_l2_lo_ppn(pt: &PageTable) -> Option<PhysPageNum> {
+    let l0_bits = unsafe { read_pte_raw(pt.root_ppn, 0) };
+    if l0_bits & 1 == 0 {
+        return None;
+    }
+    let l1_ppn = PhysPageNum::from((l0_bits >> 12) & ((1usize << 36) - 1));
+
+    let l1_bits = unsafe { read_pte_raw(l1_ppn, 0) };
+    if l1_bits & 1 == 0 {
+        return None;
+    }
+    let l2_ppn = PhysPageNum::from((l1_bits >> 12) & ((1usize << 36) - 1));
+
+    Some(l2_ppn)
+}
+
+// ---------------------------------------------------------------------------
 // Global address-space table
 // ---------------------------------------------------------------------------
 

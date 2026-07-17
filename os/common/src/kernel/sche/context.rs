@@ -11,16 +11,14 @@
 //!   └── __switch(next.kernel_stack_top)      (arch asm, NO locks held)
 //! ```
 //!
-//! # x19 convention
+//! # TCB pointer convention
 //!
-//! The AArch64 x19 register permanently holds the address of the current
-//! TCB.  It is:
+//! The current TCB address is passed explicitly to `__switch(current_tcb, next_sp)`.
+//! It is also saved/restored in the TaskContext at offset 0x08 (x19 slot)
+//! so that it persists across context switches.
 //!
-//! * Initialised once in `sche::init()` for the boot thread.
-//! * Saved / restored by `__switch` on every context switch.
-//!
-//! This means `kernel_stack_top` (the first field at offset 0 in TCB) is
-//! automatically updated by `__switch` via `str sp, [x19]`.
+//! `kernel_stack_top` (the first field at offset 0 in TCB) is
+//! automatically updated by `__switch` via `str sp, [current_tcb]`.
 //!
 //! # Locking rule
 //!
@@ -106,12 +104,7 @@ pub fn schedule() {
             let state = t.atomic_state();
             match state {
                 ThreadState::Running => {
-                    // Voluntary or involuntary yield — put back on the ready
-                    // queue so this thread runs again eventually.
                     t.set_atomic_state(ThreadState::Ready);
-                    // We must drop the borrow before calling enqueue (which
-                    // takes the ReadyQueue lock, not the table lock).
-                    // We'll re-enqueue outside this closure.
                 }
                 ThreadState::Blocked => {
                     // `block_current()` set this before calling schedule().
@@ -151,31 +144,24 @@ pub fn schedule() {
     // 5. Update per-CPU tracking.
     set_current(next_tid);
 
-    // 6. Read the next thread's kernel stack pointer.
+    // 6. Read the next thread's kernel stack pointer and current TCB address.
     let next_sp = thread::kernel_stack_top(next_tid);
-
-    log::trace!(
-        "sche: {:?} → {:?} (next_sp=0x{:x})",
-        current_tid,
-        next_tid,
-        next_sp,
-    );
+    let current_tcb = unsafe { thread::tcb_ptr(current_tid) } as usize;
 
     // 7. Context switch — **no locks held from this point**.
     //
     // SAFETY:
-    // - x19 is initialised (boot-time) and maintained by __switch.
+    // - current_tcb points to the current thread's TCB (Thread struct),
+    //   obtained from the thread table while current_tid is still valid.
     // - next_sp points to a valid 128-byte saved TaskContext on the
-    //   next thread's kernel stack, set up at thread-creation time or
-    //   by a prior call to __switch.
+    //   next thread's kernel stack.
     // - All spin locks (thread table, ready queue, IPC channels) are
     //   released — no deadlock risk.
     unsafe {
-        __switch(next_sp);
+        __switch(current_tcb, next_sp);
     }
 
     // Execution resumes here when another thread switches **back** to us.
-    log::trace!("sche: resumed {:?}", current_tid);
 }
 
 // ---------------------------------------------------------------------------

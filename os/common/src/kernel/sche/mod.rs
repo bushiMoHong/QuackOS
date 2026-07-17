@@ -111,8 +111,5 @@ pub fn init() {
 
     unsafe {
         bootstrap_idle(tid);
-        // Set x19 to point to the boot thread's TCB.
-        let tcb = thread::tcb_ptr(tid);
-        core::arch::asm!("mov x19, {}", in(reg) tcb);
     }
 }

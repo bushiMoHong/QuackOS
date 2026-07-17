@@ -38,3 +38,25 @@ pub fn sys_getcwd(_buf: usize, _size: usize) -> u64 {
     }
     _buf as u64
 }
+
+/// getpgid(pid) — syscall 154
+pub fn sys_getpgid(pid: usize, task_pid: u64) -> u64 {
+    if pid == 0 { task_pid } else { task_pid }
+}
+
+/// setpgid(pid, pgid) — syscall 155
+#[allow(unused_variables)]
+pub fn sys_setpgid(pid: usize, pgid: usize) -> u64 {
+    0
+}
+
+/// wait4(pid, wstatus, options, rusage) — syscall 260
+/// No children — return ECHILD.
+pub fn sys_wait4() -> u64 {
+    (-crate::errno::ECHILD as i64) as u64
+}
+
+/// faccessat2(dfd, filename, mode, flags) — syscall 439
+pub fn sys_faccessat2() -> u64 {
+    0
+}

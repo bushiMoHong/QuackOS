@@ -310,7 +310,13 @@ pub struct PageTable {
 impl PageTable {
     /// Register a newly-allocated intermediate page table frame so it is freed
     /// when the PageTable is dropped.
+    ///
+    /// No-ops if this is a borrowed view (`owns_root == false`) — intermediate
+    /// tables allocated through a borrowed view persist with the real page table.
     pub fn track_frame(&mut self, ppn: PhysPageNum) {
+        if !self.owns_root {
+            return;
+        }
         if self.tracker_head.is_none() {
             // 分配第一个 TrackerPage
             let tp_pa = alloc_page().expect("OOM tracking frame");
@@ -346,10 +352,13 @@ impl PageTable {
 
 impl Drop for PageTable {
     fn drop(&mut self) {
-        // 1. 释放根页表 (仅当 PageTable 拥有根页表时)
-        if self.owns_root {
-            free_page(PhysAddr::from(self.root_ppn).0);
+        // Borrowed view — nothing to free.  The real owner manages lifecycle.
+        if !self.owns_root {
+            return;
         }
+
+        // 1. 释放根页表
+        free_page(PhysAddr::from(self.root_ppn).0);
 
         // 2. 遍历 TrackerPage 链表，释放所有中间页表，最后释放 TrackerPage 本身
         let mut current_opt = self.tracker_head;

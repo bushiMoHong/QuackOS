@@ -13,7 +13,7 @@ pub fn dispatch(
         17  => crate::misc::sys_getcwd(a0, a1),
         23  => crate::fs::sys_dup(task, a0),
         25  => crate::fs::sys_fcntl(task, a0, a1, a2),
-        29  => crate::fs::sys_ioctl(a0, a1, a2),
+        29  => crate::fs::sys_ioctl(task, a0, a1, a2),
         56  => crate::fs::sys_openat(task, a0, a1, a2, a3),
         57  => crate::fs::sys_close(task, a0),
         62  => crate::fs::sys_lseek(task, a0, a1 as isize, a2),
@@ -46,7 +46,11 @@ pub fn dispatch(
         222 => crate::mm::sys_mmap(task, a0, a1, a2, a3, a4, a5),
         226 => crate::mm::sys_mprotect(task, a0, a1, a2),
         233 => crate::mm::sys_madvise(task, a0, a1, a2),
+        154 => crate::misc::sys_getpgid(a0, task.pid),
+        155 => crate::misc::sys_setpgid(a0, a1),
+        260 => crate::misc::sys_wait4(),
         278 => crate::misc::sys_getrandom(a0, a1, a2),
+        439 => crate::misc::sys_faccessat2(),
         _   => u64::from_le_bytes((-(errno::ENOSYS as i64)).to_le_bytes()),
     }
 }

@@ -1,9 +1,9 @@
-//! Init process — loads `/bin/helloworld` + liblinux, spawns the liblinux user
+//! Init process — loads `/bin/bash` + liblinux, spawns the liblinux user
 //! thread, and enters the FsServer IPC loop.
 //!
 //! Phase 0 boot flow:
 //!
-//! 1. Mount ext4, load /bin/helloworld ELF, map segments into user space.
+//! 1. Mount ext4, load /bin/bash ELF, map segments into user space.
 //! 2. Load liblinux ELF from embedded bytes, map into user space.
 //! 3. Write BootInfo at a fixed user address (bash entry, stack, brk).
 //! 4. Create a user-mode thread that runs liblinux.
@@ -95,17 +95,17 @@ pub fn run_init() -> ! {
     print_uart("\n");
 
     // ------------------------------------------------------------------
-    // 3. Read and load /bin/helloworld ELF
+    // 3. Read and load /bin/bash ELF
     // ------------------------------------------------------------------
-    let fd = fs.open(0, "/bin/helloworld", OpenFlags::O_RDONLY, 0)
-        .expect("Failed to open /bin/helloworld");
-    let stat = fs.fstat(0, fd).expect("Failed to stat /bin/helloworld");
-    print_uart("/bin/helloworld size: ");
+    let fd = fs.open(0, "/bin/bash", OpenFlags::O_RDONLY, 0)
+        .expect("Failed to open /bin/bash");
+    let stat = fs.fstat(0, fd).expect("Failed to stat /bin/bash");
+    print_uart("/bin/bash size: ");
     print_uart_hex(stat.size);
     print_uart("\n");
 
     let elf_data = fs.read(0, fd, stat.size as usize)
-        .expect("Failed to read /bin/helloworld");
+        .expect("Failed to read /bin/bash");
     fs.close(0, fd).ok();
 
     let bash = load_elf_bytes(&mut pt, &elf_data)

@@ -25,6 +25,8 @@ pub struct TaskStruct {
     pub no_new_privs: bool,
     /// Next free virtual address for mmap (simple bump allocator).
     pub mmap_base: usize,
+    /// Console termios state (kernel struct termios, 36 bytes).
+    pub termios: [u8; 36],
 }
 
 impl TaskStruct {
@@ -33,11 +35,12 @@ impl TaskStruct {
             fd_table: FdTable::new(),
             brk: initial_brk,
             initial_brk,
-            pid: 0,
+            pid: 1,
             exit_code: 0,
             clear_child_tid: 0,
             no_new_privs: false,
             mmap_base: 0x0001_0000_0000, // 4 GB, well above program segments
+            termios: crate::fs::DEFAULT_TERMIOS,
         }
     }
 

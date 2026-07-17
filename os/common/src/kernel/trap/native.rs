@@ -19,6 +19,12 @@
 //! | 8  | sys_register_linux_handler | handler_pc    | save_area  | –         | –         |
 //! | 9  | sys_linux_syscall_done     | return_value  | –          | –         | –         |
 //! | 10 | sys_yield                  | –             | –          | –         | –         |
+//! | 11 | sys_console_write          | buf_ptr       | len        | –         | –         |
+//! | 12 | sys_mprotect               | vaddr         | prot       | –         | –         |
+//! | 13 | sys_spawn                  | elf_ptr       | elf_len    | stack_top | –         |
+//! | 14 | sys_clone                  | flags         | child_sp   | par_tid   | child_tid |
+//! |    |                            | tls           |            |           |           |
+//! | 15 | sys_console_read           | buf_ptr       | len        | –         | –         |
 
 use super::{LinuxContext, TrapFrame};
 
@@ -56,6 +62,8 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
         11 => sys_console_write(tf),
         12 => sys_mprotect(tf),
         13 => sys_spawn(tf),
+        14 => sys_clone(tf),
+        15 => sys_console_read(tf),
         _  => {
             tf.general.x0 = (-ENOSYS) as usize;
         }
@@ -63,6 +71,20 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: get a PageTable for the *current* thread's address space.
+// Reads TTBR0_EL1 so we operate on the correct isolated page table, not
+// the kernel shared one.  Boot threads with TTBR0=0 fall back to KERNEL_L0_PA.
+fn current_page_table() -> aarch64::base::mm::page_table::PageTable {
+    let ttbr0: usize;
+    unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) ttbr0); }
+    if ttbr0 != 0 {
+        aarch64::base::mm::page_table::PageTable::from_token(ttbr0)
+    } else {
+        let l0 = crate::KERNEL_L0_PA.lock();
+        aarch64::base::mm::page_table::PageTable::from_token(*l0)
+    }
+}
+
 // 1. sys_map_page — map a physical page at vaddr in current AS
 // ---------------------------------------------------------------------------
 // COMPROMISE: bypassing Capability check for frame allocation.
@@ -115,9 +137,7 @@ fn sys_map_page(tf: &mut TrapFrame) {
     let vpn = VirtPageNum::from(vaddr >> 12);
     let ppn = PhysPageNum::from(pa >> 12);
 
-    // Get the kernel page table (shared with user space)
-    let l0_pa = crate::KERNEL_L0_PA.lock();
-    let mut pt = aarch64::base::mm::page_table::PageTable::from_token(*l0_pa);
+    let mut pt = current_page_table();
     pt.map(vpn, ppn, flags);
 
     tf.general.x0 = 0; // success
@@ -134,8 +154,7 @@ fn sys_unmap_page(tf: &mut TrapFrame) {
         return;
     }
 
-    let l0_pa = crate::KERNEL_L0_PA.lock();
-    let mut pt = aarch64::base::mm::page_table::PageTable::from_token(*l0_pa);
+    let mut pt = current_page_table();
     let vpn = aarch64::base::mm::VirtPageNum::from(vaddr >> 12);
 
     // Find the PTE to get the physical address for freeing
@@ -455,29 +474,6 @@ fn sys_register_linux_handler(tf: &mut TrapFrame) {
     let handler_pc = tf.general.x0;
     let save_area = tf.general.x1;
 
-    // Debug: dump registers AND raw memory at trap frame offsets
-    use super::uart_puts;
-    use super::uart_put_hex;
-    let tf_base = tf as *const TrapFrame as *const u8;
-    uart_puts("[REGHLR] tf.general.x0=");
-    uart_put_hex(tf.general.x0 as u64);
-    uart_puts(" x1=");
-    uart_put_hex(tf.general.x1 as u64);
-    uart_puts("\n[REGHLR] x30=");
-    uart_put_hex(tf.general.x30 as u64);
-    uart_puts(" x8=");
-    uart_put_hex(tf.general.x8 as u64);
-    uart_puts(" elr=");
-    uart_put_hex(tf.elr as u64);
-    // Raw memory reads to verify struct layout
-    uart_puts("\n[REGHLR] RAW[272]=");
-    uart_put_hex(unsafe { core::ptr::read_volatile(tf_base.add(272) as *const u64) });
-    uart_puts(" RAW[280]=");
-    uart_put_hex(unsafe { core::ptr::read_volatile(tf_base.add(280) as *const u64) });
-    uart_puts(" RAW[40]=");
-    uart_put_hex(unsafe { core::ptr::read_volatile(tf_base.add(40) as *const u64) });
-    uart_puts("\n");
-
     let tid = crate::kernel::sche::current_thread();
     let result = crate::kernel::sche::with_thread_mut(tid, |thread| {
         thread.linux_handler_pc = Some(handler_pc);
@@ -498,10 +494,6 @@ fn sys_register_linux_handler(tf: &mut TrapFrame) {
 ///
 /// args: x0 = return_value (the Linux syscall result)
 fn sys_linux_syscall_done(tf: &mut TrapFrame) {
-    use super::uart_puts;
-    use super::uart_put_hex;
-    uart_puts("[LSD] sys_linux_syscall_done entered\n");
-
     let return_value = tf.general.x0;
 
     let tid = crate::kernel::sche::current_thread();
@@ -513,10 +505,7 @@ fn sys_linux_syscall_done(tf: &mut TrapFrame) {
 
     let save_area = match save_area {
         Ok(Some(addr)) => addr,
-        _ => {
-            uart_puts("[LSD] no save_area, hanging\n");
-            loop { unsafe { core::arch::asm!("wfi"); } }
-        }
+        _ => loop { unsafe { core::arch::asm!("wfi"); } },
     };
 
     // Read LinuxContext from user-mode save_area
@@ -526,26 +515,6 @@ fn sys_linux_syscall_done(tf: &mut TrapFrame) {
         let ctx_ptr = save_area as *const LinuxContext;
         core::ptr::read_volatile(ctx_ptr)
     };
-
-    uart_puts("[LSD] save_area=");
-    uart_put_hex(save_area as u64);
-    uart_puts(" ret_val=");
-    uart_put_hex(return_value as u64);
-    uart_puts("\n[LSD] ctx.elr=");
-    uart_put_hex(ctx.elr);
-    uart_puts(" ctx.spsr=");
-    uart_put_hex(ctx.spsr);
-    uart_puts(" ctx.sp=");
-    uart_put_hex(ctx.sp);
-    uart_puts(" ctx.x8=");
-    uart_put_hex(ctx.x8);
-    uart_puts("\n[LSD] tf.elr(after)=");
-    uart_put_hex(tf.elr as u64);
-    uart_puts(" tf.spsr(after)=");
-    uart_put_hex(tf.spsr as u64);
-    uart_puts(" tf.sp(after)=");
-    uart_put_hex(tf.sp as u64);
-    uart_puts("\n");
 
     // Restore the original Linux program context (u64 → usize casts are
     // no-ops on AArch64 where both types are 64-bit).
@@ -601,8 +570,7 @@ fn sys_mprotect(tf: &mut TrapFrame) {
     if prot & 2 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::W); }
     if prot & 4 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::X); }
 
-    let l0_pa = crate::KERNEL_L0_PA.lock();
-    let mut pt = aarch64::base::mm::page_table::PageTable::from_token(*l0_pa);
+    let mut pt = current_page_table();
     let vpn = aarch64::base::mm::VirtPageNum::from(vaddr >> 12);
 
     match pt.find_pte(vpn) {
@@ -706,6 +674,187 @@ fn sys_spawn(tf: &mut TrapFrame) {
 }
 
 // ---------------------------------------------------------------------------
+// 14. sys_clone — create a child process that shares a copy of the parent
+// ---------------------------------------------------------------------------
+// args: x0 = flags            (clone flags, Linux ABI)
+//       x1 = child_stack      (new sp for child, or 0 to use parent's sp)
+//       x2 = parent_tid       (ptr to write child TID in parent's memory)
+//       x3 = child_tid        (ptr for CLONE_CHILD_SETTID in child's memory)
+//       x4 = tls              (TPIDR_EL0 value for child)
+// returns: x0 = child ThreadId (parent) / child wakes up with x0=0
+//
+// Clone flags we handle:
+//   CLONE_CHILD_SETTID (0x01000000) — write child TID to *child_tid
+//   CLONE_SETTLS       (0x00080000) — set child's TPIDR_EL0
+fn sys_clone(tf: &mut TrapFrame) {
+    use crate::kernel::bmm;
+    use crate::kernel::sche;
+    use crate::usr::proc::elf_loader;
+    use aarch64::base::mm::{alloc_page, free_page, VirtAddr};
+    use core::ptr::write_volatile;
+
+    let flags          = tf.general.x0;
+    let child_stack    = tf.general.x1;
+    let parent_tid_ptr = tf.general.x2;
+    let child_tid_ptr  = tf.general.x3;
+    let tls            = tf.general.x4;
+
+    const CLONE_CHILD_SETTID: usize = 0x01000000;
+    const CLONE_SETTLS:       usize = 0x00080000;
+
+    // ── 1. Read current thread info ──────────────────────────────────────
+    let tid = sche::current_thread();
+    let (asid, save_area, handler_pc) = sche::with_thread(tid, |t| {
+        (t.asid, t.linux_save_area, t.linux_handler_pc)
+    }).unwrap_or((0, None, None));
+
+    let save_area_va = match save_area {
+        Some(va) => va,
+        None => { tf.general.x0 = (-EINVAL) as usize; return; }
+    };
+    let handler_pc = match handler_pc {
+        Some(pc) => pc,
+        None => { tf.general.x0 = (-EINVAL) as usize; return; }
+    };
+
+    // ── 2. Read parent's LinuxContext from the user-space save_area ─────
+    // (Runs with the parent's TTBR0 active, so the VA resolves correctly.)
+    let parent_ctx = unsafe {
+        core::ptr::read_volatile(save_area_va as *const LinuxContext)
+    };
+
+    // ── 3. Create child page table + clone all user mappings ────────────
+    let mut child_pt = match bmm::create_kernel_mapped_page_table() {
+        Ok(pt) => pt,
+        Err(_) => { tf.general.x0 = (-ENOMEM) as usize; return; }
+    };
+
+    let parent_asid = bmm::AddressSpaceId(asid);
+    match bmm::with_page_table_mut(parent_asid, |parent_pt| {
+        bmm::clone_user_mappings(parent_pt, &mut child_pt)
+    }) {
+        Some(Ok(())) => {}
+        Some(Err(_)) => { tf.general.x0 = (-ENOMEM) as usize; return; }
+        None => { tf.general.x0 = (-EINVAL) as usize; return; }
+    }
+
+    // ── 4. Patch child's save_area copy — x0 = 0 (fork returns 0) ──────
+    let child_save_pa = match child_pt.translate_va_to_pa(VirtAddr::from(save_area_va)) {
+        Some(pa) => pa,
+        None => { tf.general.x0 = (-ENOMEM) as usize; return; }
+    };
+    unsafe { write_volatile(child_save_pa as *mut u64, 0u64); }
+
+    // ── 5. Allocate kernel stack for the child ──────────────────────────
+    let ks_pa0 = match alloc_page() {
+        Some(p) => p,
+        None => { tf.general.x0 = (-ENOMEM) as usize; return; }
+    };
+    let ks_pa1 = match alloc_page() {
+        Some(p) => p,
+        None => { free_page(ks_pa0); tf.general.x0 = (-ENOMEM) as usize; return; }
+    };
+    let ks_base = ks_pa0;
+    let ks_top  = ks_pa1 + elf_loader::KERNEL_STACK_SIZE / 2; // second page top
+    unsafe { core::ptr::write_bytes(ks_pa0 as *mut u8, 0, elf_loader::KERNEL_STACK_SIZE); }
+
+    let ctx_addr = ks_top - 128;  // TaskContext
+    let tf_addr  = ctx_addr - 288; // TrapFrame below TaskContext
+
+    // ── 6. Build child's initial TrapFrame ──────────────────────────────
+    let child_sp = if child_stack != 0 { child_stack }
+                   else { parent_ctx.sp as usize };
+    let child_tpidr = if flags & CLONE_SETTLS != 0 { tls } else { 0 };
+
+    let trapframe = TrapFrame {
+        trap_num: 0,
+        elr:  parent_ctx.elr as usize,
+        spsr: parent_ctx.spsr as usize,
+        sp:   child_sp,
+        tpidr: child_tpidr,
+        general: crate::kernel::trap::GeneralRegs {
+            x0:  0,
+            x1:  parent_ctx.x1  as usize, x2:  parent_ctx.x2  as usize,
+            x3:  parent_ctx.x3  as usize, x4:  parent_ctx.x4  as usize,
+            x5:  parent_ctx.x5  as usize, x6:  parent_ctx.x6  as usize,
+            x7:  parent_ctx.x7  as usize, x8:  parent_ctx.x8  as usize,
+            x9:  parent_ctx.x9  as usize, x10: parent_ctx.x10 as usize,
+            x11: parent_ctx.x11 as usize, x12: parent_ctx.x12 as usize,
+            x13: parent_ctx.x13 as usize, x14: parent_ctx.x14 as usize,
+            x15: parent_ctx.x15 as usize, x16: parent_ctx.x16 as usize,
+            x17: parent_ctx.x17 as usize, x18: parent_ctx.x18 as usize,
+            x19: parent_ctx.x19 as usize, x20: parent_ctx.x20 as usize,
+            x21: parent_ctx.x21 as usize, x22: parent_ctx.x22 as usize,
+            x23: parent_ctx.x23 as usize, x24: parent_ctx.x24 as usize,
+            x25: parent_ctx.x25 as usize, x26: parent_ctx.x26 as usize,
+            x27: parent_ctx.x27 as usize, x28: parent_ctx.x28 as usize,
+            x29: parent_ctx.x29 as usize, x30: parent_ctx.x30 as usize,
+        },
+    };
+    unsafe { write_volatile(tf_addr as *mut TrapFrame, trapframe); }
+
+    // ── 7. Register page table, get ASID + TTBR0 ───────────────────────
+    let (child_asid, child_ttbr0) = match bmm::register_page_table(child_pt) {
+        Some((id, token)) => (id, token),
+        None => {
+            free_page(ks_pa0); free_page(ks_pa1);
+            tf.general.x0 = (-ENOMEM) as usize; return;
+        }
+    };
+
+    // ── 8. Create kernel thread in the child's address space ────────────
+    let child_tid = match unsafe {
+        sche::create_thread(128, ks_base, ctx_addr, child_ttbr0, child_asid.0)
+    } {
+        Ok(id) => id,
+        Err(_) => {
+            bmm::unregister_address_space(child_asid);
+            free_page(ks_pa0); free_page(ks_pa1);
+            tf.general.x0 = (-ENOMEM) as usize; return;
+        }
+    };
+
+    // ── 9. Build TaskContext on child's kernel stack ────────────────────
+    let tcb_addr = unsafe { sche::tcb_ptr(child_tid) } as usize;
+    unsafe {
+        write_volatile((ctx_addr + 0x00) as *mut usize, thread_trampoline_addr());
+        write_volatile((ctx_addr + 0x08) as *mut usize, tcb_addr);
+        write_volatile((ctx_addr + 0x70) as *mut usize, 0usize);       // ttbr1 = 0
+        write_volatile((ctx_addr + 0x78) as *mut usize, child_ttbr0);  // isolated PT
+    }
+
+    // ── 10. Set child's Linux handler info (same handler + save_area) ──
+    let _ = sche::with_thread_mut(child_tid, |t| {
+        t.linux_handler_pc = Some(handler_pc);
+        t.linux_save_area  = Some(save_area_va);
+    });
+
+    // ── 11. CLONE_CHILD_SETTID — write child TID into child's memory ───
+    if flags & CLONE_CHILD_SETTID != 0 && child_tid_ptr != 0 {
+        if let Some(tid_pa) = bmm::with_page_table_mut(child_asid, |pt| {
+            pt.translate_va_to_pa(VirtAddr::from(child_tid_ptr))
+        }).flatten() {
+            unsafe { write_volatile(tid_pa as *mut u32, child_tid.0); }
+        }
+    }
+
+    // ── 12. Enqueue child thread ────────────────────────────────────────
+    let prio = sche::with_thread(child_tid, |t| t.effective_priority()).unwrap_or(128);
+    sche::enqueue_ready(child_tid, prio).ok();
+
+    // ── 13. Full TLB flush so the new AS is usable ──────────────────────
+    unsafe { core::arch::asm!("dsb ish; tlbi vmalle1is; dsb ish; isb"); }
+
+    // ── 14. Write child TID into parent's memory if requested ───────────
+    if parent_tid_ptr != 0 {
+        unsafe { write_volatile(parent_tid_ptr as *mut u32, child_tid.0); }
+    }
+
+    // ── 15. Return child TID to parent ──────────────────────────────────
+    tf.general.x0 = child_tid.0 as usize;
+}
+
+// ---------------------------------------------------------------------------
 // 11. sys_console_write — write bytes to UART from user mode
 // ---------------------------------------------------------------------------
 fn sys_console_write(tf: &mut TrapFrame) {
@@ -716,6 +865,33 @@ fn sys_console_write(tf: &mut TrapFrame) {
     for i in 0..n {
         let byte = unsafe { core::ptr::read_volatile((buf_ptr as *const u8).add(i)) };
         unsafe { core::ptr::write_volatile(0x09000000 as *mut u8, byte); }
+    }
+    tf.general.x0 = n;
+}
+
+// ---------------------------------------------------------------------------
+// 15. sys_console_read — read pending bytes from UART (non-blocking)
+// ---------------------------------------------------------------------------
+/// Drains up to `len` bytes from the PL011 RX FIFO into `buf_ptr`.
+/// Returns the number of bytes read (0 when the FIFO is empty — the caller
+/// is expected to yield and retry for blocking semantics).
+fn sys_console_read(tf: &mut TrapFrame) {
+    const UART_DR: *const u32 = 0x0900_0000 as *const u32;
+    const UART_FR: *const u32 = 0x0900_0018 as *const u32;
+    const FR_RXFE: u32 = 1 << 4;
+
+    let buf_ptr = tf.general.x0;
+    let len = tf.general.x1.min(4096);
+
+    let mut n = 0usize;
+    while n < len {
+        let fr = unsafe { core::ptr::read_volatile(UART_FR) };
+        if fr & FR_RXFE != 0 {
+            break;
+        }
+        let byte = (unsafe { core::ptr::read_volatile(UART_DR) } & 0xFF) as u8;
+        unsafe { core::ptr::write_volatile((buf_ptr as *mut u8).add(n), byte); }
+        n += 1;
     }
     tf.general.x0 = n;
 }

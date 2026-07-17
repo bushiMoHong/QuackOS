@@ -24,6 +24,7 @@ const OP_WRITE:  u8 = 6;  // added for Phase 1
 // ---------------------------------------------------------------------------
 
 /// Open a file. Returns FsServer file identifier (fid) on success.
+/// Errors are returned as positive errno values.
 pub fn fs_open(path: &str) -> Result<u64, isize> {
     let mut req = [0u8; IPC_MAX];
     req[0] = OP_OPEN;
@@ -34,12 +35,13 @@ pub fn fs_open(path: &str) -> Result<u64, isize> {
     let mut resp = [0u8; IPC_MAX];
     let ret = unsafe { native::ipc_call(FS_CHANNEL, req.as_ptr() as usize, IPC_MAX,
                                          resp.as_mut_ptr() as usize, IPC_MAX) };
-    if ret < 0 { return Err(ret as isize); }
+    if ret < 0 { return Err(-ret); }
     if resp[0..8] == [0, 0, 0, 0, 0, 0, 0, 0] {
         // Success — fid is at bytes 8-15
         Ok(u64::from_le_bytes(resp[8..16].try_into().unwrap()))
     } else {
-        Err(i64::from_le_bytes(resp[0..8].try_into().unwrap()) as isize)
+        // FsServer sends a negative errno; normalize to positive.
+        Err(-(i64::from_le_bytes(resp[0..8].try_into().unwrap()) as isize))
     }
 }
 
@@ -53,9 +55,9 @@ pub fn fs_read(fid: u64, buf: &mut [u8]) -> Result<usize, isize> {
     let mut resp = [0u8; IPC_MAX];
     let ret = unsafe { native::ipc_call(FS_CHANNEL, req.as_ptr() as usize, IPC_MAX,
                                          resp.as_mut_ptr() as usize, IPC_MAX) };
-    if ret < 0 { return Err(ret as isize); }
+    if ret < 0 { return Err(-ret); }
     let err = i64::from_le_bytes(resp[0..8].try_into().unwrap());
-    if err < 0 { return Err(err as isize); }
+    if err < 0 { return Err(-err as isize); }
 
     let n = u64::from_le_bytes(resp[8..16].try_into().unwrap()) as usize;
     let copy = n.min(buf.len());
@@ -75,9 +77,9 @@ pub fn fs_write(fid: u64, buf: &[u8]) -> Result<usize, isize> {
     let mut resp = [0u8; IPC_MAX];
     let ret = unsafe { native::ipc_call(FS_CHANNEL, req.as_ptr() as usize, IPC_MAX,
                                          resp.as_mut_ptr() as usize, IPC_MAX) };
-    if ret < 0 { return Err(ret as isize); }
+    if ret < 0 { return Err(-ret); }
     let err = i64::from_le_bytes(resp[0..8].try_into().unwrap());
-    if err < 0 { return Err(err as isize); }
+    if err < 0 { return Err(-err as isize); }
     Ok(u64::from_le_bytes(resp[8..16].try_into().unwrap()) as usize)
 }
 
@@ -90,9 +92,9 @@ pub fn fs_close(fid: u64) -> Result<(), isize> {
     let mut resp = [0u8; IPC_MAX];
     let ret = unsafe { native::ipc_call(FS_CHANNEL, req.as_ptr() as usize, IPC_MAX,
                                          resp.as_mut_ptr() as usize, IPC_MAX) };
-    if ret < 0 { return Err(ret as isize); }
+    if ret < 0 { return Err(-ret); }
     let err = i64::from_le_bytes(resp[0..8].try_into().unwrap());
-    if err < 0 { return Err(err as isize); }
+    if err < 0 { return Err(-err as isize); }
     Ok(())
 }
 
@@ -105,9 +107,9 @@ pub fn fs_fstat(fid: u64) -> Result<u64, isize> {
     let mut resp = [0u8; IPC_MAX];
     let ret = unsafe { native::ipc_call(FS_CHANNEL, req.as_ptr() as usize, IPC_MAX,
                                          resp.as_mut_ptr() as usize, IPC_MAX) };
-    if ret < 0 { return Err(ret as isize); }
+    if ret < 0 { return Err(-ret); }
     let err = i64::from_le_bytes(resp[0..8].try_into().unwrap());
-    if err < 0 { return Err(err as isize); }
+    if err < 0 { return Err(-err as isize); }
     Ok(u64::from_le_bytes(resp[8..16].try_into().unwrap()))
 }
 
@@ -122,8 +124,8 @@ pub fn fs_lseek(fid: u64, offset: isize, whence: u8) -> Result<usize, isize> {
     let mut resp = [0u8; IPC_MAX];
     let ret = unsafe { native::ipc_call(FS_CHANNEL, req.as_ptr() as usize, IPC_MAX,
                                          resp.as_mut_ptr() as usize, IPC_MAX) };
-    if ret < 0 { return Err(ret as isize); }
+    if ret < 0 { return Err(-ret); }
     let err = i64::from_le_bytes(resp[0..8].try_into().unwrap());
-    if err < 0 { return Err(err as isize); }
+    if err < 0 { return Err(-err as isize); }
     Ok(u64::from_le_bytes(resp[8..16].try_into().unwrap()) as usize)
 }

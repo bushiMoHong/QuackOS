@@ -454,16 +454,11 @@ impl FsServer {
     /// This function never returns — it services filesystem requests
     /// in a loop.  Create a dedicated kernel thread for it.
     pub fn run_ipc_loop(self: Arc<Self>) -> ! {
-        use crate::print_uart;
-
         // create_channel allocates sequential IDs starting at 0.
         // Call it twice so the FS channel gets ID 1 (FS_CHANNEL).
         let _ = crate::kernel::ipc::channel::create_channel(0); // ChannelId(0)
         let fs_channel = crate::kernel::ipc::channel::create_channel(0).unwrap(); // ChannelId(1)
         debug_assert!(fs_channel.0 == FS_CHANNEL);
-
-        print_uart("[FsServer] IPC loop starting on channel ");
-        // print_uart_hex not readily available here; skip hex print
 
         loop {
             let request = kernel_recv(fs_channel);

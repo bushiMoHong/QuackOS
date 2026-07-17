@@ -139,20 +139,23 @@ pub extern "C" fn _start() -> ! {
     const AT_PHNUM: u64  = 5;
     const AT_PAGESZ: u64 = 6;
     const AT_ENTRY: u64  = 9;
+    const AT_HWCAP: u64  = 16;
+    const AT_CLKTCK: u64 = 17;
+    const AT_RANDOM: u64 = 25;
     const AT_NULL: u64   = 0;
 
     unsafe {
         let p = sp as *mut u64;
-        // Zero the auxv region first — the stack page may contain stale data
+        // Zero the auxv region — stack page may contain stale data
         // from the physical page allocator (not guaranteed to be zeroed).
-        core::ptr::write_bytes(p, 0u8, 16 * 8);
+        core::ptr::write_bytes(p, 0u8, 32 * 8); // 256 bytes
         // argc
         p.write_volatile(0);
         // argv terminator
         p.add(1).write_volatile(0);
         // envp terminator
         p.add(2).write_volatile(0);
-        // auxv
+        // auxv entries
         p.add(3).write_volatile(AT_PHDR);
         p.add(4).write_volatile(bootinfo.phdr_addr);
         p.add(5).write_volatile(AT_PHENT);
@@ -163,19 +166,70 @@ pub extern "C" fn _start() -> ! {
         p.add(10).write_volatile(4096);
         p.add(11).write_volatile(AT_ENTRY);
         p.add(12).write_volatile(bootinfo.program_entry);
-        // AT_NULL terminator
-        p.add(13).write_volatile(AT_NULL);
+        // AT_HWCAP — CPU feature flags (0 = safe fallback)
+        p.add(13).write_volatile(AT_HWCAP);
         p.add(14).write_volatile(0);
+        // AT_CLKTCK — clock ticks per second
+        p.add(15).write_volatile(AT_CLKTCK);
+        p.add(16).write_volatile(100);
+        // AT_RANDOM — 16 random bytes for stack canary / arc4random
+        // The data lives at sp+208, right after the auxv table.
+        p.add(17).write_volatile(AT_RANDOM);
+        p.add(18).write_volatile((sp + 208) as u64);
+        // AT_NULL terminator
+        p.add(19).write_volatile(AT_NULL);
+        p.add(20).write_volatile(0);
+
+        // 16 pseudo-random bytes at sp+208
+        let random_bytes: [u8; 16] = [
+            0x7f, 0x3a, 0x91, 0x4e, 0x56, 0xb8, 0x2c, 0x0d,
+            0xe1, 0xf5, 0x48, 0x37, 0xaa, 0x9b, 0x6c, 0x12,
+        ];
+        core::ptr::copy_nonoverlapping(random_bytes.as_ptr(), (sp + 208) as *mut u8, 16);
 
         asm!("dsb ishst");
     }
 
+    // Enter the Linux program with the register state execve() guarantees:
+    // all GPRs zeroed.  glibc's _start treats x0 as rtld_fini and registers
+    // any non-NULL value with atexit — a stale stack pointer here makes
+    // exit() branch to the stack and fault.
     unsafe {
         asm!(
-            "mov sp, {sp}",
-            "br  {entry}",
-            sp = in(reg) sp,
-            entry = in(reg) entry,
+            "mov sp, x0",
+            "mov x0,  xzr",
+            "mov x1,  xzr",
+            "mov x2,  xzr",
+            "mov x3,  xzr",
+            "mov x4,  xzr",
+            "mov x5,  xzr",
+            "mov x6,  xzr",
+            "mov x7,  xzr",
+            "mov x8,  xzr",
+            "mov x9,  xzr",
+            "mov x10, xzr",
+            "mov x11, xzr",
+            "mov x12, xzr",
+            "mov x13, xzr",
+            "mov x14, xzr",
+            "mov x15, xzr",
+            "mov x17, xzr",
+            "mov x18, xzr",
+            "mov x19, xzr",
+            "mov x20, xzr",
+            "mov x21, xzr",
+            "mov x22, xzr",
+            "mov x23, xzr",
+            "mov x24, xzr",
+            "mov x25, xzr",
+            "mov x26, xzr",
+            "mov x27, xzr",
+            "mov x28, xzr",
+            "mov x29, xzr",
+            "mov x30, xzr",
+            "br  x16",
+            in("x0") sp,
+            in("x16") entry,
             options(noreturn)
         );
     }

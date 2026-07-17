@@ -71,6 +71,7 @@ impl ShortPayload {
     /// Construct a short payload from a slice of words.
     ///
     /// Returns `None` if the slice is empty or exceeds 8 words.
+    /// `len` is set to the **byte count** (words × word_size).
     pub fn from_slice(words: &[usize]) -> Option<Self> {
         if words.is_empty() || words.len() > 8 {
             return None;
@@ -79,13 +80,15 @@ impl ShortPayload {
         arr[..words.len()].copy_from_slice(words);
         Some(ShortPayload {
             words: arr,
-            len: words.len() as u8,
+            len: (words.len() * core::mem::size_of::<usize>()) as u8,
         })
     }
 
     /// Return the valid portion as a slice.
+    /// `len` is the byte count (0..64); convert to word count for slicing.
     pub fn as_slice(&self) -> &[usize] {
-        &self.words[..self.len as usize]
+        let word_count = ((self.len as usize) + 7) / 8;
+        &self.words[..word_count]
     }
 }
 
@@ -120,8 +123,9 @@ pub enum Message {
 
 impl Message {
     /// Convenience: create a ShortInfo message.
+    /// `payload.len` is the byte count.
     pub fn new_short(sender: ProcessId, payload: ShortPayload) -> Self {
-        let len = payload.len as u32 * core::mem::size_of::<usize>() as u32;
+        let len = payload.len as u32;
         Message::Short(
             MessageHeader {
                 sender,

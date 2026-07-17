@@ -142,6 +142,7 @@ impl ThreadState {
 /// `__switch` routine writes the current SP to `*(x19 + 0)`, so
 /// this field lives at offset 0 within the struct.
 #[derive(Debug)]
+#[repr(C)]
 pub struct Thread {
     // ── offset 0 (read / written by __switch) ──
     /// Saved kernel stack pointer — points to the 128-byte `TaskContext`
