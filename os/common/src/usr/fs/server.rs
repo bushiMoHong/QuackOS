@@ -49,14 +49,14 @@ fn kernel_recv(channel_id: ChannelId) -> Vec<u8> {
     match action {
         RecvMatch::Matched(sender_entry) => {
             let msg = sender_entry.msg.unwrap_or_else(|| {
-                Message::new_short(0, ShortPayload { words: [0; 8], len: 0 })
+                Message::new_short(0, ShortPayload { words: [0; 32], len: 0 })
             });
             let sender_tid = sender_entry.thread_id;
             let _ = deliver(&msg, tid, None, None);
             wake(sender_tid);
 
             if let Message::Short(_, ref payload) = msg {
-                let n = payload.len.min(64) as usize;
+                let n = payload.len.min(256) as usize;
                 let mut buf = vec![0u8; n];
                 for i in 0..((n + 7) / 8) {
                     let bytes = payload.words[i].to_le_bytes();
@@ -73,7 +73,7 @@ fn kernel_recv(channel_id: ChannelId) -> Vec<u8> {
             unsafe { block_current(IpcState::BlockedOnReceive(channel_id)); }
             let ipc_buf = get_ipc_buffer(tid).expect("kernel_recv: no buffer");
             if let Some(payload) = ipc_buf.read_short() {
-                let n = payload.len.min(64) as usize;
+                let n = payload.len.min(256) as usize;
                 let mut buf = vec![0u8; n];
                 for i in 0..((n + 7) / 8) {
                     let bytes = payload.words[i].to_le_bytes();
@@ -92,10 +92,10 @@ fn kernel_recv(channel_id: ChannelId) -> Vec<u8> {
 /// Send raw bytes through `channel_id`.  Blocks if no receiver is waiting.
 fn kernel_send(channel_id: ChannelId, data: &[u8]) {
     let tid = sche::current_thread();
-    let n = data.len().min(64);
+    let n = data.len().min(256);
 
-    let mut words = [0usize; 8];
-    let mut buf = [0u8; 64];
+    let mut words = [0usize; 32];
+    let mut buf = [0u8; 256];
     buf[..n].copy_from_slice(&data[..n]);
     for i in 0..((n + 7) / 8) {
         let off = i * 8;
@@ -106,7 +106,7 @@ fn kernel_send(channel_id: ChannelId, data: &[u8]) {
         }
         words[i] = w;
     }
-    let payload = ShortPayload { words, len: n as u8 };
+    let payload = ShortPayload { words, len: n as u16 };
     let msg = Message::new_short(1, payload);
 
     let action = with_channel(channel_id, |inner| inner.match_sender(tid, &msg))
@@ -377,7 +377,7 @@ impl FsServer {
         if req.is_empty() { return vec![0, 0, 0, 0, 0, 0, 0, 0]; }
 
         let op = req[0];
-        let mut resp = vec![0u8; 64];
+        let mut resp = vec![0u8; 256];
 
         match op {
             OP_OPEN => {
@@ -406,7 +406,7 @@ impl FsServer {
                 let tables = self.fd_tables.read();
                 if let Some(table) = tables.get(&0) {
                     if let Some(file) = table.get_file(fd) {
-                        let mut buf = vec![0u8; count.min(48)]; // 64 - 8 retval - 8 actual_len
+                        let mut buf = vec![0u8; count.min(240)]; // 256 - 8 retval - 8 actual_len
                         let n = file.read(&mut buf);
                         buf.truncate(n);
                         resp[0..8].copy_from_slice(&0i64.to_le_bytes());
@@ -483,7 +483,7 @@ impl FsServer {
                 let fd = u64::from_le_bytes(req.get(1..9).map(|s| s.try_into().unwrap()).unwrap_or([0; 8])) as usize;
                 let count = u64::from_le_bytes(req.get(9..17).map(|s| s.try_into().unwrap()).unwrap_or([0; 8])) as usize;
 
-                match self.getdents(0, fd, count.min(48)) {
+                match self.getdents(0, fd, count.min(240)) {
                     Ok(entries) => {
                         resp[0..8].copy_from_slice(&0i64.to_le_bytes());
                         resp[8..16].copy_from_slice(&(entries.len() as u64).to_le_bytes());

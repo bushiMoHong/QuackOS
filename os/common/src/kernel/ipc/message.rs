@@ -58,34 +58,33 @@ pub struct MessageHeader {
 // Short (register) payload
 // ---------------------------------------------------------------------------
 
-/// Short-message payload — at most 8 machine words, delivered through the
-/// register fast path (currently via `IpcBuffer`; future: direct register write).
+/// Short-message payload — at most 32 machine words (256 bytes), delivered
+/// through the IPC buffer path.
 #[derive(Debug, Clone, Copy)]
 pub struct ShortPayload {
-    pub words: [usize; 8],
-    /// Number of valid words (1..8).
-    pub len: u8,
-}
+    pub words: [usize; 32],
+    /// Number of valid bytes (1..255).
+    pub len: u16,}
 
 impl ShortPayload {
     /// Construct a short payload from a slice of words.
     ///
-    /// Returns `None` if the slice is empty or exceeds 8 words.
+    /// Returns `None` if the slice is empty or exceeds 32 words.
     /// `len` is set to the **byte count** (words × word_size).
     pub fn from_slice(words: &[usize]) -> Option<Self> {
-        if words.is_empty() || words.len() > 8 {
+        if words.is_empty() || words.len() > 32 {
             return None;
         }
-        let mut arr = [0usize; 8];
+        let mut arr = [0usize; 32];
         arr[..words.len()].copy_from_slice(words);
         Some(ShortPayload {
             words: arr,
-            len: (words.len() * core::mem::size_of::<usize>()) as u8,
+            len: (words.len() * core::mem::size_of::<usize>()) as u16,
         })
     }
 
     /// Return the valid portion as a slice.
-    /// `len` is the byte count (0..64); convert to word count for slicing.
+    /// `len` is the byte count (0..255); convert to word count for slicing.
     pub fn as_slice(&self) -> &[usize] {
         let word_count = ((self.len as usize) + 7) / 8;
         &self.words[..word_count]

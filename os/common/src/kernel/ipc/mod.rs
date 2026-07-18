@@ -189,7 +189,7 @@ pub fn sys_ipc_recv(
                 Ok(Message::new_short(
                     buf.sender,
                     ShortPayload {
-                        words: [0; 8],
+                        words: [0; 32],
                         len: 0,
                     },
                 ))

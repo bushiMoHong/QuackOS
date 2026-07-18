@@ -77,10 +77,10 @@ impl IpcBuffer {
             return None;
         }
         let word_count = self.payload_len / word_size;
-        if word_count > 8 {
+        if word_count > 32 {
             return None;
         }
-        let mut words = [0usize; 8];
+        let mut words = [0usize; 32];
         for i in 0..word_count {
             let start = i * word_size;
             let mut bytes = [0u8; core::mem::size_of::<usize>()];
@@ -89,7 +89,7 @@ impl IpcBuffer {
         }
         Some(ShortPayload {
             words,
-            len: (word_count * word_size) as u8,
+            len: (word_count * word_size) as u16,
         })
     }
 }

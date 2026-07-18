@@ -6,8 +6,8 @@ use crate::native;
 /// Well-known channel for the filesystem server (Phase 1).
 const FS_CHANNEL: u32 = 1;
 
-/// Maximum IPC message payload size (ShortPayload = 64 bytes).
-const IPC_MAX: usize = 64;
+/// Maximum IPC message payload size (ShortPayload = 256 bytes).
+const IPC_MAX: usize = 256;
 
 // ---------------------------------------------------------------------------
 // FS protocol constants (must match kernel's FsServer dispatch)

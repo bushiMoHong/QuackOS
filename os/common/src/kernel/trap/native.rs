@@ -191,11 +191,11 @@ fn sys_unmap_page(tf: &mut TrapFrame) {
 // IPC helpers: pack/extract raw bytes to/from ShortPayload
 // ---------------------------------------------------------------------------
 
-/// Pack raw bytes into a `ShortPayload` (max 64 bytes).
+/// Pack raw bytes into a `ShortPayload` (max 256 bytes).
 fn pack_short(msg_ptr: usize, msg_len: usize) -> crate::kernel::ipc::message::ShortPayload {
-    let mut words = [0usize; 8];
-    let n = msg_len.min(64);
-    let mut buf = [0u8; 64];
+    let mut words = [0usize; 32];
+    let n = msg_len.min(256);
+    let mut buf = [0u8; 256];
     unsafe { core::ptr::copy_nonoverlapping(msg_ptr as *const u8, buf.as_mut_ptr(), n); }
     for i in 0..((n + 7) / 8) {
         let off = i * 8;
@@ -206,14 +206,14 @@ fn pack_short(msg_ptr: usize, msg_len: usize) -> crate::kernel::ipc::message::Sh
         }
         words[i] = w;
     }
-    crate::kernel::ipc::message::ShortPayload { words, len: n as u8 }
+    crate::kernel::ipc::message::ShortPayload { words, len: n as u16 }
 }
 
 /// Extract raw bytes from a `ShortPayload` and copy to user buffer.
 fn unpack_short(payload: &crate::kernel::ipc::message::ShortPayload, buf_ptr: usize, buf_len: usize) -> usize {
-    let n = (payload.len as usize).min(buf_len).min(64);
-    let mut buf = [0u8; 64];
-    for i in 0..8 {
+    let n = (payload.len as usize).min(buf_len).min(256);
+    let mut buf = [0u8; 256];
+    for i in 0..32 {
         let bytes = payload.words[i].to_le_bytes();
         let off = i * 8;
         if off < n {
@@ -235,7 +235,7 @@ fn sys_ipc_send(tf: &mut TrapFrame) {
     let msg_ptr = tf.general.x1;
     let msg_len = tf.general.x2;
 
-    if msg_len > 64 {
+    if msg_len > 256 {
         tf.general.x0 = (-EINVAL) as usize;
         return;
     }
@@ -294,7 +294,7 @@ fn sys_ipc_recv(tf: &mut TrapFrame) {
             let msg = sender_entry.msg.unwrap_or_else(|| {
                 Message::new_short(
                     0,
-                    crate::kernel::ipc::message::ShortPayload { words: [0; 8], len: 0 }
+                    crate::kernel::ipc::message::ShortPayload { words: [0; 32], len: 0 }
                 )
             });
             let sender_tid = sender_entry.thread_id;
