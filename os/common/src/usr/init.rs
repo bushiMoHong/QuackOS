@@ -22,7 +22,8 @@ use crate::print_uart;
 use crate::print_uart_hex;
 
 use crate::usr::proc::elf_loader::{
-    load_elf_bytes, map_user_stack, spawn_user_thread_in_as, USER_STACK_TOP,
+    load_elf_bytes, map_user_stack, spawn_user_thread_in_as,
+    BOOTINFO_VA, USER_STACK_TOP,
 };
 use crate::kernel::bmm::{self, create_kernel_mapped_page_table};
 
@@ -43,7 +44,7 @@ const LIBLINUX_ELF: &[u8] = include_bytes!("../../../liblinux/target/aarch64-unk
 /// mapped page.
 /// The BootInfo data is consumed before any Linux syscalls overwrite
 /// the SAVE_AREA with the LinuxContext.
-const BOOTINFO_ADDR: usize = 0x204028;
+const BOOTINFO_ADDR: usize = BOOTINFO_VA;
 
 #[repr(C)]
 struct BootInfo {

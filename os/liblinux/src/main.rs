@@ -34,7 +34,11 @@ use task::TaskStruct;
 // ---------------------------------------------------------------------------
 
 /// Fixed user-space address where the kernel writes BootInfo.
-const BOOTINFO_ADDR: usize = 0x204028; // same as SAVE_AREA, overwritten after BootInfo consumed
+/// Placed right after SAVE_AREA (34×u64 = 272 bytes at the .bss Symbol) so
+/// it lives in the same already-mapped page and the kernel's BootInfo write
+/// never overlaps with live liblinux data.
+/// Must match the kernel-side `elf_loader::BOOTINFO_VA`.
+const BOOTINFO_ADDR: usize = 0x208110;
 
 #[repr(C)]
 struct BootInfo {

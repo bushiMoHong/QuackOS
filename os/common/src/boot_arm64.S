@@ -47,10 +47,3 @@
 	    .space 262144                // 预留 256 KB 作为启动栈！(65536 * 4)
 	.global boot_stack_top
 	boot_stack_top:
-
-	.align 12
-	.global exc_stack
-	exc_stack:
-	    .space 8192                  // 8 KB 专用异常栈
-	.global exc_stack_top
-	exc_stack_top:

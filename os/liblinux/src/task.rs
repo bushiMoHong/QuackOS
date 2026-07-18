@@ -27,6 +27,10 @@ pub struct TaskStruct {
     pub mmap_base: usize,
     /// Console termios state (kernel struct termios, 36 bytes).
     pub termios: [u8; 36],
+    /// Pending canonical-mode input line (delivered across short reads).
+    pub line_buf: [u8; 4096],
+    pub line_len: usize,
+    pub line_pos: usize,
 }
 
 impl TaskStruct {
@@ -41,6 +45,9 @@ impl TaskStruct {
             no_new_privs: false,
             mmap_base: 0x0001_0000_0000, // 4 GB, well above program segments
             termios: crate::fs::DEFAULT_TERMIOS,
+            line_buf: [0; 4096],
+            line_len: 0,
+            line_pos: 0,
         }
     }
 

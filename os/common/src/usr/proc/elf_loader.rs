@@ -41,6 +41,12 @@ pub const USER_STACK_PAGES: usize = 32; // 128 KiB
 /// Default bottom of the user stack.
 pub const USER_STACK_BOTTOM: usize = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
 
+/// Fixed user-space address where the kernel writes BootInfo.
+/// Must match liblinux's `BOOTINFO_ADDR`.
+/// Placed right after liblinux's SAVE_AREA (34×u64 = 272 bytes) in the
+/// same ELF-mapped page — no extra mapping needed.
+pub const BOOTINFO_VA: usize = 0x208110;
+
 // ---------------------------------------------------------------------------
 // Page-table helpers
 // ---------------------------------------------------------------------------
@@ -368,7 +374,6 @@ pub fn map_user_stack(pt: &mut PageTable) {
     let flags = MapFlags(MapFlags::READ | MapFlags::WRITE | MapFlags::USER);
     map_user_pages_anon(pt, USER_STACK_BOTTOM, USER_STACK_PAGES, flags);
 }
-
 /// Map anonymous user stack pages at a custom range.
 pub fn map_user_stack_at(pt: &mut PageTable, stack_bottom: usize, pages: usize) {
     let flags = MapFlags(MapFlags::READ | MapFlags::WRITE | MapFlags::USER);

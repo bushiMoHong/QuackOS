@@ -50,29 +50,12 @@ pub fn sys_write(_task: &mut TaskStruct, fd: usize, buf_ptr: usize, count: usize
 pub fn sys_read(_task: &mut TaskStruct, fd: usize, buf_ptr: usize, count: usize) -> u64 {
     match _task.fd_table.get(fd) {
         Some(FdKind::Console) => {
-            // Blocking console read: poll the UART, yielding while empty.
-            let len = count.min(4096);
-            if len == 0 { return 0; }
-            let mut tmp = [0u8; 4096];
-            loop {
-                let n = unsafe { crate::native::console_read(tmp.as_mut_ptr(), len) };
-                if n > 0 {
-                    let n = n as usize;
-                    let iflag = termios_iflag(&_task.termios);
-                    let lflag = termios_lflag(&_task.termios);
-                    if iflag & ICRNL != 0 {
-                        for b in tmp[..n].iter_mut() {
-                            if *b == b'\r' { *b = b'\n'; }
-                        }
-                    }
-                    if lflag & ECHO != 0 {
-                        unsafe { crate::native::console_write(tmp.as_ptr(), n); }
-                    }
-                    unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf_ptr as *mut u8, n); }
-                    return n as u64;
-                }
-                if n < 0 { return (-errno::EIO as u64); }
-                unsafe { crate::native::yield_cpu(); }
+            if count == 0 { return 0; }
+            let lflag = termios_lflag(&_task.termios);
+            if lflag & 0x0002 != 0 {
+                console_read_canonical(_task, buf_ptr, count)
+            } else {
+                console_read_raw(_task, buf_ptr, count)
             }
         }
         Some(FdKind::File(fid)) => {
@@ -160,6 +143,128 @@ pub const DEFAULT_TERMIOS: [u8; 36] = [
 
 fn termios_iflag(t: &[u8; 36]) -> u32 { u32::from_le_bytes(t[0..4].try_into().unwrap()) }
 fn termios_lflag(t: &[u8; 36]) -> u32 { u32::from_le_bytes(t[12..16].try_into().unwrap()) }
+
+/// Canonical (line-edited) console read.  Builds a full line in the task's
+/// pending buffer — handling erase and echo locally — and only delivers
+/// bytes to the caller once Enter is seen.  Partial deliveries (e.g. bash's
+/// `read` builtin doing 1-byte reads) resume from the pending buffer.
+fn console_read_canonical(task: &mut TaskStruct, buf_ptr: usize, count: usize) -> u64 {
+    // Deliver leftover bytes from a previously completed line first.
+    if task.line_pos < task.line_len {
+        let avail = task.line_len - task.line_pos;
+        let n = avail.min(count);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                task.line_buf.as_ptr().add(task.line_pos), buf_ptr as *mut u8, n);
+        }
+        task.line_pos += n;
+        return n as u64;
+    }
+
+    let iflag = termios_iflag(&task.termios);
+    let lflag = termios_lflag(&task.termios);
+    let echo_on = lflag & ECHO != 0;
+
+    let mut line = [0u8; 4096];
+    let mut len = 0usize;
+
+    loop {
+        let mut b = 0u8;
+        let n = unsafe { crate::native::console_read(&mut b, 1) };
+        if n < 0 { return (-errno::EIO as u64); }
+        if n == 0 {
+            unsafe { crate::native::yield_cpu(); }
+            continue;
+        }
+
+        if b == b'\r' && iflag & ICRNL != 0 {
+            b = b'\n';
+        }
+
+        match b {
+            0x7F | 0x08 => {
+                // Backspace: erase last char from the line and the screen.
+                if len > 0 {
+                    len -= 1;
+                    if echo_on {
+                        unsafe { crate::native::console_write(b"\x08 \x08".as_ptr(), 3); }
+                    }
+                }
+            }
+            0x04 => {
+                // ^D (VEOF): empty line → EOF; otherwise deliver what we have.
+                if len == 0 { return 0; }
+                break;
+            }
+            b'\n' => {
+                line[len] = b'\n';
+                len += 1;
+                if echo_on {
+                    unsafe { crate::native::console_write(b"\n".as_ptr(), 1); }
+                }
+                break;
+            }
+            _ => {
+                if len < line.len() - 1 {
+                    line[len] = b;
+                    len += 1;
+                    if echo_on {
+                        unsafe { crate::native::console_write(&b, 1); }
+                    }
+                }
+            }
+        }
+    }
+
+    task.line_buf[..len].copy_from_slice(&line[..len]);
+    task.line_len = len;
+    task.line_pos = 0;
+
+    let n = len.min(count);
+    unsafe { core::ptr::copy_nonoverlapping(line.as_ptr(), buf_ptr as *mut u8, n); }
+    task.line_pos = n;
+    n as u64
+}
+
+/// Raw-mode console read: deliver bytes as they arrive, no line editing.
+/// ICRNL/ECHO are still honored if the application left them enabled.
+fn console_read_raw(task: &mut TaskStruct, buf_ptr: usize, count: usize) -> u64 {
+    let iflag = termios_iflag(&task.termios);
+    let lflag = termios_lflag(&task.termios);
+    let len = count.min(4096);
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = unsafe { crate::native::console_read(tmp.as_mut_ptr(), len) };
+        if n < 0 { return (-errno::EIO as u64); }
+        if n == 0 {
+            unsafe { crate::native::yield_cpu(); }
+            continue;
+        }
+        let n = n as usize;
+        if iflag & ICRNL != 0 {
+            for b in tmp[..n].iter_mut() {
+                if *b == b'\r' { *b = b'\n'; }
+            }
+        }
+        if lflag & ECHO != 0 {
+            // Translate backspace to BS-SP-BS for visual erase.
+            let mut eb = [0u8; 4096];
+            let mut ei = 0;
+            for &b in &tmp[..n] {
+                if b == 0x7F || b == 0x08 {
+                    eb[ei] = 0x08; ei += 1;
+                    eb[ei] = b' '; ei += 1;
+                    eb[ei] = 0x08; ei += 1;
+                } else {
+                    eb[ei] = b; ei += 1;
+                }
+            }
+            unsafe { crate::native::console_write(eb.as_ptr(), ei); }
+        }
+        unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf_ptr as *mut u8, n); }
+        return n as u64;
+    }
+}
 
 fn console_ioctl(task: &mut TaskStruct, request: usize, arg: usize) -> isize {
     match request {
