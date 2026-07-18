@@ -27,16 +27,18 @@ pub fn sys_getrandom(_buf: usize, _len: usize, _flags: usize) -> u64 {
     0
 }
 
-/// getcwd — syscall 17 (stub)
-pub fn sys_getcwd(_buf: usize, _size: usize) -> u64 {
-    // Write "/" as the current working directory
-    if _size > 0 {
+/// getcwd — syscall 17
+pub fn sys_getcwd(task: &crate::task::TaskStruct, buf: usize, size: usize) -> u64 {
+    if size == 0 { return (-crate::errno::EINVAL as u64); }
+    let cwd_len = task.cwd.iter().position(|&b| b == 0).unwrap_or(0);
+    let copy = cwd_len.min(size - 1);
+    if buf != 0 {
         unsafe {
-            *(_buf as *mut u8) = b'/';
-            *(_buf as *mut u8).add(1) = 0;
+            core::ptr::copy_nonoverlapping(task.cwd.as_ptr(), buf as *mut u8, copy);
+            *((buf as *mut u8).add(copy)) = 0;
         }
     }
-    _buf as u64
+    buf as u64
 }
 
 /// getpgid(pid) — syscall 154
@@ -48,12 +50,6 @@ pub fn sys_getpgid(pid: usize, task_pid: u64) -> u64 {
 #[allow(unused_variables)]
 pub fn sys_setpgid(pid: usize, pgid: usize) -> u64 {
     0
-}
-
-/// wait4(pid, wstatus, options, rusage) — syscall 260
-/// No children — return ECHILD.
-pub fn sys_wait4() -> u64 {
-    (-crate::errno::ECHILD as i64) as u64
 }
 
 /// faccessat2(dfd, filename, mode, flags) — syscall 439

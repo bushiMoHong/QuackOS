@@ -103,3 +103,186 @@ pub fn sys_prctl(task: &mut TaskStruct, option: usize, arg2: usize, _arg3: usize
         _ => (-crate::errno::EINVAL as u64),
     }
 }
+
+/// clone(flags, child_sp, parent_tid, child_tid, tls) — syscall 220
+///
+/// Creates a child process that shares a copy of the parent's address space.
+/// The kernel handles page table cloning and thread creation.
+/// Returns: child tid in parent, 0 in child.
+pub fn sys_clone(_task: &mut TaskStruct, flags: usize, child_sp: usize,
+                 parent_tid: usize, child_tid: usize, tls: usize) -> u64 {
+    let ret = unsafe { native::clone(flags, child_sp, parent_tid, child_tid, tls) };
+    // ret is already -errno on failure; Linux ABI returns it as-is.
+    ret as u64
+}
+
+/// execve(path, argv, envp) — syscall 221
+///
+/// Replaces the current process image with a new ELF loaded from `path`.
+/// Reads the ELF via IPC, then calls the kernel's sys_exec to perform the
+/// address-space replacement.
+pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_ptr: usize) -> u64 {
+    let mut path = [0u8; 256];
+    let len = unsafe {
+        let mut l = 0;
+        while l < 256 {
+            let b = *((path_ptr as *const u8).add(l));
+            if b == 0 { break; }
+            path[l] = b;
+            l += 1;
+        }
+        l
+    };
+    let path_str = core::str::from_utf8(&path[..len]).unwrap_or("/");
+    if path_str.is_empty() {
+        return (-crate::errno::ENOENT as u64);
+    }
+
+    let page_size = 4096;
+
+    // Open the file
+    let fid = match crate::ipc::fs_open(path_str) {
+        Ok(f) => f,
+        Err(e) => return (-e as u64),
+    };
+
+    // Get file size
+    let file_size = match crate::ipc::fs_fstat(fid) {
+        Ok(sz) => sz as usize,
+        Err(e) => { crate::ipc::fs_close(fid).ok(); return (-e as u64); }
+    };
+    if file_size == 0 || file_size > 16 * 1024 * 1024 {
+        crate::ipc::fs_close(fid).ok();
+        return (-crate::errno::ENOEXEC as u64);
+    }
+
+    // Map pages for the ELF buffer + one extra for BootInfo
+    let buf_addr = task.mmap_base;
+    let buf_size = (file_size + page_size - 1) & !(page_size - 1);
+    let total_size = buf_size + page_size; // extra page for BootInfo
+    unsafe {
+        for va in (buf_addr..buf_addr + total_size).step_by(page_size) {
+            let ret = crate::native::map_page(va, 1 | 2);
+            if ret < 0 {
+                let mut c = buf_addr;
+                while c < va {
+                    crate::native::unmap_page(c);
+                    c += page_size;
+                }
+                crate::ipc::fs_close(fid).ok();
+                return (-crate::errno::ENOMEM as u64);
+            }
+        }
+    }
+
+    // Read the entire ELF — loop since IPC payload is limited
+    let mut total = 0usize;
+    while total < file_size {
+        let buf_slice = unsafe {
+            core::slice::from_raw_parts_mut((buf_addr + total) as *mut u8, file_size - total)
+        };
+        match crate::ipc::fs_read(fid, buf_slice) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(e) => {
+                crate::ipc::fs_close(fid).ok();
+                for va in (buf_addr..buf_addr + total_size).step_by(page_size) {
+                    unsafe { crate::native::unmap_page(va); }
+                }
+                return (-e as u64);
+            }
+        }
+    }
+    crate::ipc::fs_close(fid).ok();
+
+    // Parse ELF header
+    let elf_slice = unsafe { core::slice::from_raw_parts(buf_addr as *const u8, total) };
+    let (entry, brk, phdr_addr, phent, phnum) = match xmas_elf::ElfFile::new(elf_slice) {
+        Ok(elf) => {
+            let entry = elf.header.pt2.entry_point() as usize;
+            let mut data_end = 0usize;
+            let mut first_load_va = 0usize;
+            for ph in elf.program_iter() {
+                if ph.get_type() == Ok(xmas_elf::program::Type::Load) {
+                    let vaddr = ph.virtual_addr() as usize;
+                    let memsz = ph.mem_size() as usize;
+                    if first_load_va == 0 { first_load_va = vaddr; }
+                    let seg_end = vaddr + memsz;
+                    if seg_end > data_end { data_end = seg_end; }
+                }
+            }
+            let brk = (data_end + page_size - 1) & !(page_size - 1);
+            let phdr = first_load_va + elf.header.pt2.ph_offset() as usize;
+            let phent = elf.header.pt2.ph_entry_size();
+            let phnum = elf.header.pt2.ph_count();
+            (entry, brk, phdr, phent, phnum)
+        }
+        Err(_) => {
+            for va in (buf_addr..buf_addr + total_size).step_by(page_size) {
+                unsafe { crate::native::unmap_page(va); }
+            }
+            return (-crate::errno::ENOEXEC as u64);
+        }
+    };
+
+    // Write BootInfo to the extra page after the ELF buffer
+    #[repr(C)]
+    struct BootInfo {
+        program_entry: u64,
+        stack_top: u64,
+        brk: u64,
+        phdr_addr: u64,
+        phent_size: u64,
+        phnum: u64,
+    }
+    let stack_top = 0x7FFF_FFF1_0000usize;
+    let bootinfo_addr = buf_addr + buf_size;
+    unsafe {
+        core::ptr::write_volatile(bootinfo_addr as *mut BootInfo, BootInfo {
+            program_entry: entry as u64,
+            stack_top: stack_top as u64,
+            brk: brk as u64,
+            phdr_addr: phdr_addr as u64,
+            phent_size: phent as u64,
+            phnum: phnum as u64,
+        });
+    }
+
+    // Call native exec — on success this never returns
+    let ret = unsafe { crate::native::exec(buf_addr, total, stack_top, bootinfo_addr) };
+
+    // If exec returns, it failed — clean up
+    for va in (buf_addr..buf_addr + total_size).step_by(page_size) {
+        unsafe { crate::native::unmap_page(va); }
+    }
+    if ret < 0 { ret as u64 } else { 0 }
+}
+
+/// wait4(pid, wstatus, options, rusage) — syscall 260
+///
+/// Waits for a child process to exit.  The kernel returns -EAGAIN while
+/// children are alive but none has exited; we yield and retry to get
+/// blocking semantics, unless WNOHANG was requested.
+pub fn sys_wait4(_task: &TaskStruct, _pid: usize, wstatus: usize, options: usize, _rusage: usize) -> u64 {
+    const WNOHANG: usize = 1;
+    const EAGAIN: isize = 11;
+
+    loop {
+        let (ret, status) = unsafe { native::wait4() };
+        if ret == -EAGAIN {
+            if options & WNOHANG != 0 {
+                return 0; // children exist but none exited yet
+            }
+            unsafe { native::yield_cpu(); }
+            continue;
+        }
+        if ret < 0 {
+            return ret as u64; // -errno (e.g. -ECHILD), Linux ABI returns it as-is
+        }
+        // Write the exit status to user-space
+        if wstatus != 0 {
+            unsafe { core::ptr::write_volatile(wstatus as *mut i32, status as i32); }
+        }
+        return ret as u64;
+    }
+}

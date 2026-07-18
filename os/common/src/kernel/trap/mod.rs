@@ -288,7 +288,9 @@ fn linux_syscall_name(nr: usize) -> &'static str {
         222 => "mmap",
         226 => "mprotect",
         233 => "madvise",
+        59  => "pipe2",
         220 => "clone",
+        221 => "execve",
         278 => "getrandom",
         293 => "rseq",
         _   => "?",
@@ -312,6 +314,8 @@ fn native_syscall_name(nr: usize) -> &'static str {
         13 => "spawn",
         14 => "clone",
         15 => "console_read",
+        16 => "exec",
+        17 => "wait4",
         _  => "?",
     }
 }

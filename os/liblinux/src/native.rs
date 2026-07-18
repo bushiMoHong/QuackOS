@@ -17,7 +17,10 @@ const SYS_LINUX_SYSCALL_DONE:     u64 = 9;
 const SYS_YIELD:                  u64 = 10;
 const SYS_CONSOLE_WRITE:         u64 = 11;
 const SYS_MPROTECT:              u64 = 12;
+const SYS_CLONE:                 u64 = 14;
 const SYS_CONSOLE_READ:          u64 = 15;
+const SYS_EXEC:                  u64 = 16;
+const SYS_WAIT4:                 u64 = 17;
 
 /// Issue a native (SVC #1) syscall with up to 4 arguments.
 /// Returns x0.
@@ -120,4 +123,32 @@ pub unsafe fn mprotect_page(vaddr: usize, prot: usize) -> isize {
 
 pub unsafe fn yield_cpu() {
     svc1(SYS_YIELD, 0, 0, 0, 0);
+}
+
+/// clone(flags, child_sp, parent_tid, child_tid, tls) → child tid in parent, 0 in child
+pub unsafe fn clone(flags: usize, child_sp: usize, parent_tid: usize, child_tid: usize, tls: usize) -> isize {
+    svc1_5(SYS_CLONE, flags, child_sp, parent_tid, child_tid, tls) as isize
+}
+
+/// exec(elf_ptr, elf_len, stack_top, bootinfo_ptr) — replace current process
+/// On success this never returns to the caller (TrapFrame is overwritten).
+/// On failure returns negative errno.
+pub unsafe fn exec(elf_ptr: usize, elf_len: usize, stack_top: usize, bootinfo_ptr: usize) -> isize {
+    svc1_5(SYS_EXEC, elf_ptr, elf_len, stack_top, bootinfo_ptr, 0) as isize
+}
+
+/// wait4() — wait for a child to exit.
+/// Returns (child_tid, exit_status) on success.  Caller must check
+/// child_tid for negative errno (e.g. -ECHILD).
+#[inline(always)]
+pub unsafe fn wait4() -> (isize, usize) {
+    let x0: usize;
+    let x1: usize;
+    core::arch::asm!(
+        "svc #1",
+        in("x8") SYS_WAIT4,
+        out("x0") x0,
+        out("x1") x1,
+    );
+    (x0 as isize, x1)
 }

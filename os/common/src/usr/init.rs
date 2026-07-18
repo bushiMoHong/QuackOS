@@ -95,6 +95,31 @@ pub fn run_init() -> ! {
     print_uart_hex(liblinux.brk as u64);
     print_uart("\n");
 
+    // Store liblinux VA range so sys_exec can clone liblinux into new AS.
+    // Find the start VA by scanning ELF program headers.
+    {
+        use xmas_elf::ElfFile;
+        let elf = ElfFile::new(LIBLINUX_ELF).unwrap();
+        let mut start = usize::MAX;
+        let mut end = 0usize;
+        for ph in elf.program_iter() {
+            if let Ok(xmas_elf::program::Type::Load) = ph.get_type() {
+                let va = ph.virtual_addr() as usize;
+                let memsz = ph.mem_size() as usize;
+                start = start.min(va);
+                end = end.max(va + memsz);
+            }
+        }
+        let start_page = start & !0xFFF;
+        let end_page = (end + 0xFFF) & !0xFFF;
+        crate::kernel::trap::native::store_liblinux_range(start_page, end_page, liblinux.entry);
+        print_uart("liblinux range: ");
+        print_uart_hex(start_page as u64);
+        print_uart(" - ");
+        print_uart_hex(end_page as u64);
+        print_uart("\n");
+    }
+
     // ------------------------------------------------------------------
     // 3. Read and load /bin/bash ELF
     // ------------------------------------------------------------------

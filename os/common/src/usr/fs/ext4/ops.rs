@@ -58,6 +58,10 @@ impl InodeOp for Ext4Inode {
         }
     }
 
+    fn read_link(&self) -> Result<String, Errno> {
+        self.read_link()
+    }
+
     fn lookup(&self, name: &str, parent_entry: Arc<Dentry>) -> Arc<Dentry> {
         let mut dentry = Dentry::negative(
             format!("{}/{}", parent_entry.absolute_path, name),

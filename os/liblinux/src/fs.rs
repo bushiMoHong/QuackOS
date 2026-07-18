@@ -19,20 +19,20 @@ pub const O_APPEND: u32 = 0x0400;
 
 /// write(fd, buf, count) — syscall 64
 pub fn sys_write(_task: &mut TaskStruct, fd: usize, buf_ptr: usize, count: usize) -> u64 {
-    if fd <= 2 {
-        // Console: stdout (1) / stderr (2) → write to UART
-        if fd == 0 {
-            return (-errno::EBADF as u64);
+    match _task.fd_table.get(fd) {
+        Some(FdKind::Console) => {
+            if fd == 0 {
+                return (-errno::EBADF as u64);
+            }
+            let len = count.min(4096);
+            let ret = unsafe { crate::native::console_write(buf_ptr as *const u8, len) };
+            if ret < 0 {
+                (-crate::errno::EIO as u64)
+            } else {
+                ret as u64
+            }
         }
-        let len = count.min(4096);
-        let ret = unsafe { crate::native::console_write(buf_ptr as *const u8, len) };
-        if ret < 0 {
-            (-crate::errno::EIO as u64)
-        } else {
-            ret as u64
-        }
-    } else {
-        if let Some(fid) = _task.fd_table.get_fid(fd) {
+        Some(FdKind::File(fid)) => {
             let len = count.min(4096);
             let mut tmp = [0u8; 4096];
             unsafe { core::ptr::copy_nonoverlapping(buf_ptr as *const u8, tmp.as_mut_ptr(), len); }
@@ -40,9 +40,11 @@ pub fn sys_write(_task: &mut TaskStruct, fd: usize, buf_ptr: usize, count: usize
                 Ok(n) => n as u64,
                 Err(e) => (-e as u64),
             }
-        } else {
-            (-errno::EBADF as u64)
         }
+        Some(FdKind::PipeWrite(idx)) => {
+            pipe_write(_task, idx, buf_ptr, count)
+        }
+        _ => (-errno::EBADF as u64),
     }
 }
 
@@ -68,6 +70,9 @@ pub fn sys_read(_task: &mut TaskStruct, fd: usize, buf_ptr: usize, count: usize)
                 }
                 Err(e) => (-e as u64),
             }
+        }
+        Some(FdKind::PipeRead(idx)) => {
+            pipe_read(_task, idx, buf_ptr, count)
         }
         _ => (-errno::EBADF as u64),
     }
@@ -107,6 +112,24 @@ pub fn sys_close(task: &mut TaskStruct, fd: usize) -> u64 {
         Some(FdKind::Console) => 0,
         Some(FdKind::File(fid)) => {
             ipc::fs_close(fid).ok();
+            0
+        }
+        Some(FdKind::PipeRead(idx)) => {
+            if let Some(ref mut pipe) = task.pipes[idx] {
+                pipe.readers -= 1;
+                if pipe.readers == 0 && pipe.writers == 0 {
+                    task.pipes[idx] = None;
+                }
+            }
+            0
+        }
+        Some(FdKind::PipeWrite(idx)) => {
+            if let Some(ref mut pipe) = task.pipes[idx] {
+                pipe.writers -= 1;
+                if pipe.readers == 0 && pipe.writers == 0 {
+                    task.pipes[idx] = None;
+                }
+            }
             0
         }
         _ => (-errno::EBADF as u64),
@@ -314,7 +337,7 @@ pub fn sys_ioctl(task: &mut TaskStruct, fd: usize, request: usize, arg: usize) -
     match task.fd_table.get(fd) {
         Some(FdKind::Console) => {
             let ret = console_ioctl(task, request, arg);
-            if ret < 0 { (-ret as u64) } else { ret as u64 }
+            ret as u64 // negative values are already -errno
         }
         _ => (-crate::errno::ENOTTY as u64),
     }
@@ -337,36 +360,8 @@ pub fn sys_writev(task: &mut TaskStruct, fd: usize, iov: usize, iovcnt: usize) -
 }
 
 /// fstat(fd, statbuf) — syscall 80
-pub fn sys_fstat(task: &mut TaskStruct, fd: usize, statbuf_ptr: usize) -> u64 {
-    match task.fd_table.get(fd) {
-        Some(FdKind::Console) => {
-            // Character device: S_IFCHR | 0620, rdev = (5,1) like /dev/console
-            unsafe {
-                core::ptr::write_bytes(statbuf_ptr as *mut u8, 0, 128);
-                *((statbuf_ptr + 16) as *mut u32) = 0x2000 | 0o620; // st_mode
-                *((statbuf_ptr + 20) as *mut u32) = 1;              // st_nlink
-                *((statbuf_ptr + 32) as *mut u64) = (5 << 8) | 1;   // st_rdev
-                *((statbuf_ptr + 56) as *mut u32) = 1024;           // st_blksize
-            }
-            0
-        }
-        Some(FdKind::File(fid)) => {
-            match ipc::fs_fstat(fid) {
-                Ok(size) => {
-                    unsafe {
-                        core::ptr::write_bytes(statbuf_ptr as *mut u8, 0, 128);
-                        *((statbuf_ptr + 16) as *mut u32) = 0x8000 | 0o644; // st_mode: S_IFREG
-                        *((statbuf_ptr + 20) as *mut u32) = 1;              // st_nlink
-                        *((statbuf_ptr + 48) as *mut u64) = size;           // st_size
-                        *((statbuf_ptr + 56) as *mut u32) = 4096;           // st_blksize
-                    }
-                    0
-                }
-                Err(e) => (-e as u64),
-            }
-        }
-        _ => (-errno::EBADF as u64),
-    }
+pub fn sys_fstat(task: &TaskStruct, fd: usize, statbuf_ptr: usize) -> u64 {
+    sys_fstat_fd(task, fd, statbuf_ptr)
 }
 
 /// lseek(fd, offset, whence) — syscall 62
@@ -382,12 +377,225 @@ pub fn sys_lseek(task: &mut TaskStruct, fd: usize, offset: isize, whence: usize)
 }
 
 /// dup(oldfd) — syscall 23
-pub fn sys_dup(task: &TaskStruct, oldfd: usize) -> u64 {
-    if task.fd_table.get(oldfd).is_some() {
-        oldfd as u64
+pub fn sys_dup(task: &mut TaskStruct, oldfd: usize) -> u64 {
+    // Allocate the lowest free fd pointing to the same object as oldfd.
+    let entry = match task.fd_table.get(oldfd) {
+        Some(kind) => kind,
+        _ => return (-errno::EBADF as u64),
+    };
+    match task.fd_table.alloc_kind(entry, 0) {
+        Some(newfd) => newfd as u64,
+        None => (-errno::EMFILE as u64),
+    }
+}
+
+/// dup3(oldfd, newfd, flags) — syscall 24
+pub fn sys_dup3(task: &mut TaskStruct, oldfd: usize, newfd: usize, _flags: usize) -> u64 {
+    if oldfd == newfd { return (-errno::EINVAL as u64); }
+    let entry = match task.fd_table.get(oldfd) {
+        Some(kind) => kind,
+        _ => return (-errno::EBADF as u64),
+    };
+    // Close newfd first if open, then assign
+    task.fd_table.close(newfd);
+    task.fd_table.alloc_kind(entry, 0);
+    newfd as u64
+}
+
+/// chdir(path) — syscall 49
+pub fn sys_chdir(task: &mut TaskStruct, path_ptr: usize) -> u64 {
+    let mut path = [0u8; 256];
+    let len = unsafe {
+        let mut l = 0;
+        while l < 256 {
+            let b = *((path_ptr as *const u8).add(l));
+            if b == 0 { break; }
+            path[l] = b;
+            l += 1;
+        }
+        l
+    };
+    task.cwd = [0u8; 256];
+    task.cwd[..len.min(255)].copy_from_slice(&path[..len.min(255)]);
+    0
+}
+
+/// getdents64(fd, buf, count) — syscall 61
+pub fn sys_getdents64(task: &TaskStruct, fd: usize, buf_ptr: usize, count: usize) -> u64 {
+    if let Some(fid) = task.fd_table.get_fid(fd) {
+        let len = count.min(4096);
+        let mut tmp = [0u8; 4096];
+        match ipc::fs_getdents(fid, &mut tmp[..len]) {
+            Ok(n) => {
+                unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf_ptr as *mut u8, n); }
+                n as u64
+            }
+            Err(e) => (-e as u64),
+        }
     } else {
         (-errno::EBADF as u64)
     }
+}
+
+/// readlinkat(dfd, path, buf, bufsize) — syscall 78
+pub fn sys_readlinkat(_task: &TaskStruct, _dfd: usize, path_ptr: usize, buf_ptr: usize, bufsize: usize) -> u64 {
+    let mut path = [0u8; 256];
+    let len = unsafe {
+        let mut l = 0;
+        while l < 256 {
+            let b = *((path_ptr as *const u8).add(l));
+            if b == 0 { break; }
+            path[l] = b;
+            l += 1;
+        }
+        l
+    };
+    let path_str = core::str::from_utf8(&path[..len]).unwrap_or("");
+    let mut tmp = [0u8; 256];
+    match ipc::fs_readlink(path_str, &mut tmp) {
+        Ok(n) => {
+            let copy = n.min(bufsize);
+            if copy > 0 && buf_ptr != 0 {
+                unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf_ptr as *mut u8, copy); }
+            }
+            copy as u64
+        }
+        Err(e) => (-e as u64),
+    }
+}
+
+/// newfstatat(dfd, path, statbuf, flags) — syscall 79
+/// Implemented as open + fstat + close directly via IPC.
+pub fn sys_newfstatat(task: &TaskStruct, dfd: usize, path_ptr: usize, statbuf_ptr: usize, flags: usize) -> u64 {
+    const AT_EMPTY_PATH: usize = 0x1000;
+
+    if flags & AT_EMPTY_PATH != 0 {
+        return sys_fstat_fd(task, dfd, statbuf_ptr);
+    }
+
+    let mut path = [0u8; 256];
+    let len = unsafe {
+        let mut l = 0;
+        while l < 256 {
+            let b = *((path_ptr as *const u8).add(l));
+            if b == 0 { break; }
+            path[l] = b;
+            l += 1;
+        }
+        l
+    };
+    let path_str = core::str::from_utf8(&path[..len]).unwrap_or("/");
+
+    match ipc::fs_open(path_str) {
+        Ok(fid) => {
+            let ret = match ipc::fs_fstat(fid) {
+                Ok(size) => {
+                    unsafe {
+                        core::ptr::write_bytes(statbuf_ptr as *mut u8, 0, 128);
+                        *((statbuf_ptr + 16) as *mut u32) = 0x8000 | 0o644;
+                        *((statbuf_ptr + 20) as *mut u32) = 1;
+                        *((statbuf_ptr + 48) as *mut u64) = size;
+                        *((statbuf_ptr + 56) as *mut u32) = 4096;
+                    }
+                    0
+                }
+                Err(e) => (-e as u64),
+            };
+            ipc::fs_close(fid).ok();
+            ret
+        }
+        Err(e) => (-e as u64),
+    }
+}
+
+/// Write stat to user buffer (shared by fstat and newfstatat Console path).
+fn sys_fstat_fd(task: &TaskStruct, fd: usize, statbuf_ptr: usize) -> u64 {
+    match task.fd_table.get(fd) {
+        Some(FdKind::Console) => {
+            unsafe {
+                core::ptr::write_bytes(statbuf_ptr as *mut u8, 0, 128);
+                *((statbuf_ptr + 16) as *mut u32) = 0x2000 | 0o620;
+                *((statbuf_ptr + 20) as *mut u32) = 1;
+                *((statbuf_ptr + 32) as *mut u64) = (5 << 8) | 1;
+                *((statbuf_ptr + 56) as *mut u32) = 1024;
+            }
+            0
+        }
+        Some(FdKind::File(fid)) => {
+            match ipc::fs_fstat(fid) {
+                Ok(size) => {
+                    unsafe {
+                        core::ptr::write_bytes(statbuf_ptr as *mut u8, 0, 128);
+                        *((statbuf_ptr + 16) as *mut u32) = 0x8000 | 0o644;
+                        *((statbuf_ptr + 20) as *mut u32) = 1;
+                        *((statbuf_ptr + 48) as *mut u64) = size;
+                        *((statbuf_ptr + 56) as *mut u32) = 4096;
+                    }
+                    0
+                }
+                Err(e) => (-e as u64),
+            }
+        }
+        _ => (-errno::EBADF as u64),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pipe helpers
+// ---------------------------------------------------------------------------
+
+fn pipe_read(task: &mut TaskStruct, idx: usize, buf_ptr: usize, count: usize) -> u64 {
+    let pipe = match &mut task.pipes[idx] {
+        Some(p) => p,
+        None => return (-errno::EBADF as u64),
+    };
+
+    if pipe.byte_count == 0 {
+        // No data available — return 0 (EOF if writer closed, or would-block)
+        if pipe.writers == 0 {
+            return 0; // EOF
+        }
+        return 0; // non-blocking empty
+    }
+
+    let n = count.min(pipe.byte_count);
+    let pipe_buf_size = 4096;
+
+    for i in 0..n {
+        let b = pipe.buf[pipe.read_pos];
+        pipe.read_pos = (pipe.read_pos + 1) % pipe_buf_size;
+        pipe.byte_count -= 1;
+        unsafe {
+            *((buf_ptr as *mut u8).add(i)) = b;
+        }
+    }
+
+    n as u64
+}
+
+fn pipe_write(task: &mut TaskStruct, idx: usize, buf_ptr: usize, count: usize) -> u64 {
+    let pipe = match &mut task.pipes[idx] {
+        Some(p) => p,
+        None => return (-errno::EBADF as u64),
+    };
+
+    if pipe.readers == 0 {
+        // SIGPIPE would normally be delivered; return -EPIPE
+        return (-crate::errno::EPIPE as u64);
+    }
+
+    let pipe_buf_size = 4096;
+    let free = pipe_buf_size - pipe.byte_count;
+    let n = count.min(free);
+
+    for i in 0..n {
+        let b = unsafe { *((buf_ptr as *const u8).add(i)) };
+        pipe.buf[pipe.write_pos] = b;
+        pipe.write_pos = (pipe.write_pos + 1) % pipe_buf_size;
+        pipe.byte_count += 1;
+    }
+
+    n as u64
 }
 
 /// fcntl(fd, cmd, arg) — syscall 25
@@ -418,4 +626,53 @@ pub fn sys_fcntl(task: &mut TaskStruct, fd: usize, cmd: usize, arg: usize) -> u6
         4 => 0,
         _ => (-errno::EINVAL as u64),
     }
+}
+
+/// pipe2(fds_ptr, flags) — syscall 59
+///
+/// Creates an anonymous pipe.  Writes fds[0] (read end) and fds[1] (write end)
+/// into the user-space array at `fds_ptr`.
+pub fn sys_pipe2(task: &mut TaskStruct, fds_ptr: usize, _flags: usize) -> u64 {
+    // Find a free pipe slot
+    let pipe_idx = match task.pipes.iter().position(|p| p.is_none()) {
+        Some(i) => i,
+        None => return (-crate::errno::EMFILE as u64),
+    };
+
+    // Create pipe
+    task.pipes[pipe_idx] = Some(crate::task::Pipe {
+        buf: [0u8; 4096],
+        read_pos: 0,
+        write_pos: 0,
+        byte_count: 0,
+        readers: 1,
+        writers: 1,
+    });
+
+    // Allocate read fd
+    let read_fd = match task.fd_table.alloc_kind(FdKind::PipeRead(pipe_idx), 0) {
+        Some(fd) => fd,
+        None => {
+            task.pipes[pipe_idx] = None;
+            return (-crate::errno::EMFILE as u64);
+        }
+    };
+
+    // Allocate write fd
+    let write_fd = match task.fd_table.alloc_kind(FdKind::PipeWrite(pipe_idx), 0) {
+        Some(fd) => fd,
+        None => {
+            task.fd_table.close(read_fd);
+            task.pipes[pipe_idx] = None;
+            return (-crate::errno::EMFILE as u64);
+        }
+    };
+
+    // Write fds to user-space
+    unsafe {
+        core::ptr::write_volatile(fds_ptr as *mut i32, read_fd as i32);
+        core::ptr::write_volatile((fds_ptr as *mut i32).add(1), write_fd as i32);
+    }
+
+    0
 }

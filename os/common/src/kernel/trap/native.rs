@@ -25,8 +25,25 @@
 //! | 14 | sys_clone                  | flags         | child_sp   | par_tid   | child_tid |
 //! |    |                            | tls           |            |           |           |
 //! | 15 | sys_console_read           | buf_ptr       | len        | –         | –         |
+//! | 16 | sys_exec                   | elf_ptr       | elf_len    | stack_top | bootinfo  |
+//! |    |                            |               |            |           | ptr       |
+//! | 17 | sys_wait4                  | –             | –          | –         | –         |
 
 use super::{LinuxContext, TrapFrame};
+
+// ---------------------------------------------------------------------------
+// liblinux VA range — stored during init, used by sys_exec
+// ---------------------------------------------------------------------------
+static LIBLINUX_VA_START: spin::Mutex<usize> = spin::Mutex::new(0);
+static LIBLINUX_VA_END: spin::Mutex<usize> = spin::Mutex::new(0);
+static LIBLINUX_ENTRY: spin::Mutex<usize> = spin::Mutex::new(0);
+
+/// Store liblinux's VA boundaries after init loads liblinux ELF.
+pub fn store_liblinux_range(start: usize, end: usize, entry: usize) {
+    *LIBLINUX_VA_START.lock() = start;
+    *LIBLINUX_VA_END.lock() = end;
+    *LIBLINUX_ENTRY.lock() = entry;
+}
 
 // ---------------------------------------------------------------------------
 // Linux-compatible errno constants (negative return values)
@@ -64,6 +81,8 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
         13 => sys_spawn(tf),
         14 => sys_clone(tf),
         15 => sys_console_read(tf),
+        16 => sys_exec(tf),
+        17 => sys_wait4(tf),
         _  => {
             tf.general.x0 = (-ENOSYS) as usize;
         }
@@ -295,8 +314,10 @@ fn sys_ipc_recv(tf: &mut TrapFrame) {
                 Err(_) => { tf.general.x0 = 0; return; }
             };
             if let Some(payload) = buf.read_short() {
-                tf.general.x0 = unpack_short(&payload, buf_ptr, buf_len);
+                let n = unpack_short(&payload, buf_ptr, buf_len);
+                tf.general.x0 = n;
             } else {
+                crate::print_uart("[R:empty]");
                 tf.general.x0 = 0;
             }
         }
@@ -361,18 +382,12 @@ fn sys_create_thread(tf: &mut TrapFrame) {
     use crate::kernel::sche::{self, enqueue_ready};
     use core::ptr::write_volatile;
 
-    // Allocate kernel stack (2 pages = 8 KB)
-    let stack_pa0 = match alloc_page() { Some(p) => p, None => { tf.general.x0 = (-ENOMEM) as usize; return; } };
-    let stack_pa1 = match alloc_page() { Some(p) => p, None => { tf.general.x0 = (-ENOMEM) as usize; return; } };
-
-    let stack_base = stack_pa0;
-    let stack_top_ks = stack_pa1 + PAGE_SIZE; // top of second page
-    let stack_size = 2 * PAGE_SIZE;
-
-    // Zero the stack pages
-    unsafe {
-        core::ptr::write_bytes(stack_pa0 as *mut u8, 0, stack_size);
-    }
+    // Allocate kernel stack (2 physically contiguous pages = 8 KB, zeroed)
+    let stack_base = match aarch64::base::mm::alloc_pages_contig(2) {
+        Some(p) => p,
+        None => { tf.general.x0 = (-ENOMEM) as usize; return; }
+    };
+    let stack_top_ks = stack_base + 2 * PAGE_SIZE;
 
     // Compute pointers within the kernel stack:
     // TaskContext (128 bytes) right below the top
@@ -406,8 +421,8 @@ fn sys_create_thread(tf: &mut TrapFrame) {
     } {
         Ok(tid) => tid,
         Err(_) => {
-            aarch64::base::mm::free_page(stack_pa0);
-            aarch64::base::mm::free_page(stack_pa1);
+            aarch64::base::mm::free_page(stack_base);
+            aarch64::base::mm::free_page(stack_base + 4096);
             tf.general.x0 = (-ENOMEM) as usize;
             return;
         }
@@ -441,9 +456,14 @@ fn sys_create_thread(tf: &mut TrapFrame) {
 // 7. sys_exit_thread — exit the current thread
 // ---------------------------------------------------------------------------
 fn sys_exit_thread(tf: &mut TrapFrame) {
-    let _exit_code = tf.general.x0;
+    let exit_code = tf.general.x0 as i32;
 
     let current_tid = crate::kernel::sche::current_thread();
+
+    // Store exit code for wait4
+    let _ = crate::kernel::sche::with_thread_mut(current_tid, |t| {
+        t.exit_code = exit_code;
+    });
 
     // Mark as Dying — scheduler will skip re-enqueuing.
     let _ = crate::kernel::sche::with_thread_mut(current_tid, |t| {
@@ -690,7 +710,7 @@ fn sys_clone(tf: &mut TrapFrame) {
     use crate::kernel::bmm;
     use crate::kernel::sche;
     use crate::usr::proc::elf_loader;
-    use aarch64::base::mm::{alloc_page, free_page, VirtAddr};
+    use aarch64::base::mm::{alloc_page, alloc_pages_contig, free_page, VirtAddr};
     use core::ptr::write_volatile;
 
     let flags          = tf.general.x0;
@@ -745,18 +765,12 @@ fn sys_clone(tf: &mut TrapFrame) {
     };
     unsafe { write_volatile(child_save_pa as *mut u64, 0u64); }
 
-    // ── 5. Allocate kernel stack for the child ──────────────────────────
-    let ks_pa0 = match alloc_page() {
+    // ── 5. Allocate kernel stack for the child (contiguous, zeroed) ─────
+    let ks_base = match aarch64::base::mm::alloc_pages_contig(2) {
         Some(p) => p,
         None => { tf.general.x0 = (-ENOMEM) as usize; return; }
     };
-    let ks_pa1 = match alloc_page() {
-        Some(p) => p,
-        None => { free_page(ks_pa0); tf.general.x0 = (-ENOMEM) as usize; return; }
-    };
-    let ks_base = ks_pa0;
-    let ks_top  = ks_pa1 + elf_loader::KERNEL_STACK_SIZE / 2; // second page top
-    unsafe { core::ptr::write_bytes(ks_pa0 as *mut u8, 0, elf_loader::KERNEL_STACK_SIZE); }
+    let ks_top = ks_base + elf_loader::KERNEL_STACK_SIZE;
 
     let ctx_addr = ks_top - 128;  // TaskContext
     let tf_addr  = ctx_addr - 288; // TrapFrame below TaskContext
@@ -764,7 +778,10 @@ fn sys_clone(tf: &mut TrapFrame) {
     // ── 6. Build child's initial TrapFrame ──────────────────────────────
     let child_sp = if child_stack != 0 { child_stack }
                    else { parent_ctx.sp as usize };
-    let child_tpidr = if flags & CLONE_SETTLS != 0 { tls } else { 0 };
+    // Without CLONE_SETTLS the child inherits the parent's TLS pointer.
+    // tf.tpidr holds the caller's TPIDR_EL0 (saved on trap entry), which is
+    // the Linux program's TLS — liblinux never modifies it.
+    let child_tpidr = if flags & CLONE_SETTLS != 0 { tls } else { tf.tpidr };
 
     let trapframe = TrapFrame {
         trap_num: 0,
@@ -797,7 +814,7 @@ fn sys_clone(tf: &mut TrapFrame) {
     let (child_asid, child_ttbr0) = match bmm::register_page_table(child_pt) {
         Some((id, token)) => (id, token),
         None => {
-            free_page(ks_pa0); free_page(ks_pa1);
+            free_page(ks_base); free_page(ks_base + 4096);
             tf.general.x0 = (-ENOMEM) as usize; return;
         }
     };
@@ -809,7 +826,7 @@ fn sys_clone(tf: &mut TrapFrame) {
         Ok(id) => id,
         Err(_) => {
             bmm::unregister_address_space(child_asid);
-            free_page(ks_pa0); free_page(ks_pa1);
+            free_page(ks_base); free_page(ks_base + 4096);
             tf.general.x0 = (-ENOMEM) as usize; return;
         }
     };
@@ -823,8 +840,9 @@ fn sys_clone(tf: &mut TrapFrame) {
         write_volatile((ctx_addr + 0x78) as *mut usize, child_ttbr0);  // isolated PT
     }
 
-    // ── 10. Set child's Linux handler info (same handler + save_area) ──
+    // ── 10. Set child's parent + Linux handler info ──
     let _ = sche::with_thread_mut(child_tid, |t| {
+        t.parent_tid = Some(tid);
         t.linux_handler_pc = Some(handler_pc);
         t.linux_save_area  = Some(save_area_va);
     });
@@ -852,6 +870,198 @@ fn sys_clone(tf: &mut TrapFrame) {
 
     // ── 15. Return child TID to parent ──────────────────────────────────
     tf.general.x0 = child_tid.0 as usize;
+}
+
+// ---------------------------------------------------------------------------
+// 16. sys_exec — replace current address space with a new ELF (execve)
+// ---------------------------------------------------------------------------
+// args: x0 = elf_data_ptr (user-space ELF buffer)
+//       x1 = elf_len       (length in bytes)
+//       x2 = stack_top     (top of user stack for new process)
+//       x3 = bootinfo_ptr  (user-space BootInfo for the new program)
+// returns: does not return on success (TrapFrame is overwritten)
+fn sys_exec(tf: &mut TrapFrame) {
+    use crate::kernel::bmm;
+    use crate::usr::proc::elf_loader;
+    use alloc::vec;
+
+    const BOOTINFO_VA: usize = 0x208110; // must match elf_loader::BOOTINFO_VA
+
+    let elf_ptr      = tf.general.x0;
+    let elf_len      = tf.general.x1;
+    let stack_top    = tf.general.x2;
+    let bootinfo_ptr = tf.general.x3;
+
+    // Validate
+    if elf_len == 0 || elf_len > 1024 * 1024 * 16 {
+        tf.general.x0 = (-EINVAL) as usize;
+        return;
+    }
+    if stack_top & 0xF != 0 || stack_top >= 0x0000_8000_0000_0000 {
+        tf.general.x0 = (-EINVAL) as usize;
+        return;
+    }
+
+    // Copy ELF data from user space
+    let mut elf_buf = vec![0u8; elf_len as usize];
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            elf_ptr as *const u8,
+            elf_buf.as_mut_ptr(),
+            elf_len as usize,
+        );
+    }
+
+    // Copy BootInfo from user space
+    #[repr(C)]
+    struct BootInfo { program_entry: u64, stack_top: u64, brk: u64,
+                      phdr_addr: u64, phent_size: u64, phnum: u64, }
+    let bootinfo = unsafe { core::ptr::read_volatile(bootinfo_ptr as *const BootInfo) };
+
+    // Create a new page table with kernel identity mappings
+    let mut pt = match bmm::create_kernel_mapped_page_table() {
+        Ok(pt) => pt,
+        Err(_) => { tf.general.x0 = (-ENOMEM) as usize; return; }
+    };
+
+    // Clone only the liblinux image into the new AS — the old program's
+    // pages (code, stack, mmap regions) must NOT survive an exec.
+    let lib_entry = *LIBLINUX_ENTRY.lock();
+    let lib_start = *LIBLINUX_VA_START.lock();
+    let lib_end   = *LIBLINUX_VA_END.lock();
+    if lib_entry == 0 || lib_start >= lib_end {
+        tf.general.x0 = (-ENOMEM) as usize;
+        return;
+    }
+
+    let current_tid = crate::kernel::sche::current_thread();
+    let old_asid_val = crate::kernel::sche::with_thread(current_tid, |t| t.asid).unwrap_or(0);
+    if old_asid_val != 0 {
+        let old_asid = bmm::AddressSpaceId(old_asid_val);
+        let _ = bmm::with_page_table_mut(old_asid, |old_pt| {
+            bmm::clone_user_range(old_pt, &mut pt, lib_start, lib_end)
+        });
+    }
+
+    // Load the new Linux ELF into the page table
+    if let Err(_) = elf_loader::load_elf_bytes(&mut pt, &elf_buf) {
+        tf.general.x0 = (-EINVAL) as usize;
+        return;
+    }
+
+    // Map user stack
+    elf_loader::map_user_stack(&mut pt);
+
+    // Write BootInfo into the new AS at BOOTINFO_VA
+    let boot_pa = match pt.translate_va_to_pa(aarch64::base::mm::VirtAddr::from(BOOTINFO_VA)) {
+        Some(pa) => pa,
+        None => { tf.general.x0 = (-ENOMEM) as usize; return; }
+    };
+    unsafe { core::ptr::write_volatile(boot_pa as *mut BootInfo, bootinfo); }
+
+    // Register new AS
+    let (new_asid, new_ttbr0) = match bmm::register_page_table(pt) {
+        Some((id, token)) => (id, token),
+        None => { tf.general.x0 = (-ENOMEM) as usize; return; }
+    };
+
+    // Update current thread's AS
+    let _ = crate::kernel::sche::with_thread_mut(current_tid, |t| {
+        t.asid = new_asid.0;
+        t.ttbr0 = new_ttbr0;
+        t.linux_handler_pc = None;
+        t.linux_save_area = None;
+    });
+
+    // Overwrite TrapFrame to restart into liblinux _start
+    tf.elr = lib_entry;
+    tf.spsr = 0; // EL0t
+    tf.sp = stack_top;
+    tf.general.x0 = 0;
+    tf.general.x1  = 0; tf.general.x2  = 0; tf.general.x3  = 0;
+    tf.general.x4  = 0; tf.general.x5  = 0; tf.general.x6  = 0;
+    tf.general.x7  = 0; tf.general.x8  = 0; tf.general.x9  = 0;
+    tf.general.x10 = 0; tf.general.x11 = 0; tf.general.x12 = 0;
+    tf.general.x13 = 0; tf.general.x14 = 0; tf.general.x15 = 0;
+    tf.general.x16 = 0; tf.general.x17 = 0; tf.general.x18 = 0;
+    tf.general.x19 = 0; tf.general.x20 = 0; tf.general.x21 = 0;
+    tf.general.x22 = 0; tf.general.x23 = 0; tf.general.x24 = 0;
+    tf.general.x25 = 0; tf.general.x26 = 0; tf.general.x27 = 0;
+    tf.general.x28 = 0; tf.general.x29 = 0; tf.general.x30 = 0;
+
+    // Switch to the new TTBR0 and flush TLB BEFORE freeing the old AS.
+    // The old page table pages must not be walked after they are freed.
+    unsafe {
+        core::arch::asm!(
+            "msr ttbr0_el1, {ttbr}",
+            "isb",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            ttbr = in(reg) new_ttbr0,
+        );
+    }
+
+    // Now safe to free the old AS — TTBR0 points to the new one.
+    if old_asid_val != 0 {
+        bmm::unregister_address_space(bmm::AddressSpaceId(old_asid_val));
+    }
+
+    // Return 0 — but the caller (trap_return) will eret to liblinux _start,
+    // not back to the old binary.  This is the execve semantic.
+    tf.general.x0 = 0;
+}
+
+// ---------------------------------------------------------------------------
+// 17. sys_wait4 — wait for a child thread to exit
+// ---------------------------------------------------------------------------
+// args: none (uses current thread to find children)
+// returns: x0 = child tid on success / -ECHILD if no children
+fn sys_wait4(tf: &mut TrapFrame) {
+    let current_tid = crate::kernel::sche::current_thread();
+
+    // Scan all threads: is there a Dying child? any child at all?
+    let (child, has_children) = crate::kernel::sche::with_all_threads(|threads| {
+        let mut dying = None;
+        let mut any = false;
+        for t in threads.iter() {
+            if t.parent_tid == Some(current_tid) {
+                any = true;
+                if t.atomic_state() == crate::kernel::sche::ThreadState::Dying {
+                    dying = Some((t.id, t.exit_code));
+                    break;
+                }
+            }
+        }
+        (dying, any)
+    });
+
+    match child {
+        Some((child_tid, exit_code)) => {
+            // Clean up: destroy the child thread + its AS
+            let child_asid = crate::kernel::sche::with_thread(child_tid, |t| t.asid).unwrap_or(0);
+            if child_asid != 0 {
+                crate::kernel::bmm::unregister_address_space(
+                    crate::kernel::bmm::AddressSpaceId(child_asid));
+            }
+            let _ = crate::kernel::sche::destroy_thread(child_tid);
+
+            // Return pid in x0, status in x1
+            // status = (exit_code & 0xFF) << 8  (WIFEXITED + WEXITSTATUS encoding)
+            let status = ((exit_code & 0xFF) << 8) as usize;
+            tf.general.x0 = child_tid.0 as usize;
+            tf.general.x1 = status;
+        }
+        None if has_children => {
+            // Children exist but none has exited yet — caller retries.
+            const EAGAIN: isize = 11;
+            tf.general.x0 = (-EAGAIN as i64) as usize;
+        }
+        None => {
+            const ECHILD: isize = 10;
+            tf.general.x0 = (-ECHILD as i64) as usize;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

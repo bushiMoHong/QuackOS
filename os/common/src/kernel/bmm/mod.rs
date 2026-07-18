@@ -409,76 +409,100 @@ pub fn create_kernel_mapped_page_table() -> Result<PageTable, MapError> {
 
 /// Copy every mapped user page from `src` to `dst` with fresh physical pages.
 ///
-/// Walks L2_LO[0..0x48) (VA 0x0 through 0x8F_FFFF), and for each valid L3
-/// page or L2 block, allocates a new physical page, copies the data, and maps
-/// it at the same VA with the same permission flags.
+/// Performs a full four-level walk of `src`, cloning every EL0-accessible
+/// (AP[1]=1) 4 KiB page — program segments, user stack (L0[255]) and mmap
+/// regions (VA 4 GiB+) included.
 ///
-/// Kernel identity mappings (L1[1]) and device blocks (L2_LO[0x48], [0x50])
-/// are left untouched — `dst` is assumed to already contain them (i.e. was
-/// created via `create_kernel_mapped_page_table`).
+/// Kernel identity mappings (the L1[1] RAM block and device blocks) have
+/// AP[1]=0 and are skipped automatically — `dst` is assumed to already
+/// contain them (i.e. was created via `create_kernel_mapped_page_table`).
 pub fn clone_user_mappings(
     src: &PageTable,
     dst: &mut PageTable,
 ) -> Result<(), MapError> {
-    // Read src L2_LO table: L0[0] → L1 → L1[0] → L2_LO
-    let l2_lo_ppn = get_l2_lo_ppn(src).ok_or(MapError::InvalidArgument)?;
+    clone_user_range(src, dst, 0, usize::MAX)
+}
 
-    for l2_idx in 0..0x48usize {
-        let l2_bits = unsafe { read_pte_raw(l2_lo_ppn, l2_idx) };
-        if l2_bits & 1 == 0 {
-            continue; // not valid
-        }
+/// Like [`clone_user_mappings`] but only clones pages whose VA falls in
+/// `[start_va, end_va)`.  Used by exec to carry the liblinux image into the
+/// new address space without dragging along the old program's pages.
+pub fn clone_user_range(
+    src: &PageTable,
+    dst: &mut PageTable,
+    start_va: usize,
+    end_va: usize,
+) -> Result<(), MapError> {
+    const PA_MASK: usize = 0x0000_FFFF_FFFF_F000;
+    const EL0_BIT: usize = 1 << 6; // AP[1] — EL0 accessible
 
-        let is_table = (l2_bits >> 1) & 1 == 1;
+    let l0_ppn = src.root_ppn;
+    for l0_idx in 0..512usize {
+        let l0_bits = unsafe { read_pte_raw(l0_ppn, l0_idx) };
+        // L0 entries are always table descriptors (blocks are invalid at L0).
+        if l0_bits & 0b11 != 0b11 { continue; }
+        let l1_ppn = PhysPageNum::from((l0_bits & PA_MASK) >> 12);
 
-        if is_table {
-            let l3_ppn = PhysPageNum::from((l2_bits >> 12) & ((1usize << 36) - 1));
-            for l3_idx in 0..512 {
-                let l3_bits = unsafe { read_pte_raw(l3_ppn, l3_idx) };
-                if l3_bits & 1 == 0 {
+        for l1_idx in 0..512usize {
+            let l1_bits = unsafe { read_pte_raw(l1_ppn, l1_idx) };
+            if l1_bits & 1 == 0 { continue; }
+            // 1 GiB blocks only exist as the EL1-only kernel identity map.
+            if l1_bits & 0b10 == 0 { continue; }
+            let l2_ppn = PhysPageNum::from((l1_bits & PA_MASK) >> 12);
+
+            for l2_idx in 0..512usize {
+                let l2_bits = unsafe { read_pte_raw(l2_ppn, l2_idx) };
+                if l2_bits & 1 == 0 { continue; }
+
+                if l2_bits & 0b10 == 0 {
+                    // 2 MiB block. Device blocks are EL1-only → skipped here.
+                    if l2_bits & EL0_BIT == 0 { continue; }
+                    let src_base = l2_bits & PA_MASK;
+                    let flags = PageTableEntry { bits: l2_bits }.flags();
+                    for i in 0..512usize {
+                        let va = (l0_idx << 39) | (l1_idx << 30) | (l2_idx << 21) | (i << 12);
+                        if va < start_va || va >= end_va { continue; }
+                        let dst_pa = alloc_page().ok_or(MapError::OutOfMemory)?;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                (src_base + i * PAGE_SIZE) as *const u8,
+                                dst_pa as *mut u8,
+                                PAGE_SIZE,
+                            );
+                        }
+                        dst.map(
+                            VirtPageNum::from(va >> 12),
+                            PhysPageNum::from(dst_pa >> 12),
+                            flags,
+                        );
+                    }
                     continue;
                 }
 
-                let src_pa = (l3_bits >> 12) << 12; // output address (bits [47:12])
-                let dst_pa = alloc_page().ok_or(MapError::OutOfMemory)?;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        (src_pa & 0x0000_FFFF_FFFF_F000) as *const u8,
-                        dst_pa as *mut u8,
-                        PAGE_SIZE,
+                let l3_ppn = PhysPageNum::from((l2_bits & PA_MASK) >> 12);
+                for l3_idx in 0..512usize {
+                    let l3_bits = unsafe { read_pte_raw(l3_ppn, l3_idx) };
+                    if l3_bits & 1 == 0 { continue; }
+                    if l3_bits & EL0_BIT == 0 { continue; } // not a user page
+
+                    let va = (l0_idx << 39) | (l1_idx << 30) | (l2_idx << 21) | (l3_idx << 12);
+                    if va < start_va || va >= end_va { continue; }
+
+                    let src_pa = l3_bits & PA_MASK;
+                    let dst_pa = alloc_page().ok_or(MapError::OutOfMemory)?;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src_pa as *const u8,
+                            dst_pa as *mut u8,
+                            PAGE_SIZE,
+                        );
+                    }
+                    let pte = PageTableEntry { bits: l3_bits };
+                    dst.map(
+                        VirtPageNum::from(va >> 12),
+                        PhysPageNum::from(dst_pa >> 12),
+                        pte.flags(),
                     );
                 }
-
-                let va = (l2_idx << 21) | (l3_idx << 12);
-                let vpn = VirtPageNum::from(va >> 12);
-                let ppn = PhysPageNum::from(dst_pa >> 12);
-
-                // Reconstruct PTEFlags from the source L3 PTE bits.
-                let pte = PageTableEntry { bits: l3_bits };
-                dst.map(vpn, ppn, pte.flags());
-            }
-        } else {
-            // L2 block entry (2 MiB).  Rare with the current loader, but handle
-            // it for correctness.  Allocate 512 × 4 KiB pages independently so
-            // the destination stays page-granular for later CoW or mprotect.
-            let src_base = (l2_bits >> 12) << 12;
-            let block_pte = PageTableEntry { bits: l2_bits };
-            let flags = block_pte.flags();
-
-            for i in 0..512 {
-                let dst_pa = alloc_page().ok_or(MapError::OutOfMemory)?;
-                let offset = i * PAGE_SIZE;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        ((src_base & 0x0000_FFFF_FFFF_F000) + offset) as *const u8,
-                        dst_pa as *mut u8,
-                        PAGE_SIZE,
-                    );
-                }
-                let va = (l2_idx << 21) | (i << 12);
-                let vpn = VirtPageNum::from(va >> 12);
-                let ppn = PhysPageNum::from(dst_pa >> 12);
-                dst.map(vpn, ppn, flags);
             }
         }
     }
@@ -492,23 +516,6 @@ unsafe fn read_pte_raw(ppn: PhysPageNum, idx: usize) -> usize {
     let pa = PhysAddr::from(ppn).0;
     let table = &*(pa as *const [usize; 512]);
     table[idx]
-}
-
-/// Walk L0[0] → L1 → L1[0] → L2_LO and return the PhysPageNum of the L2_LO table.
-fn get_l2_lo_ppn(pt: &PageTable) -> Option<PhysPageNum> {
-    let l0_bits = unsafe { read_pte_raw(pt.root_ppn, 0) };
-    if l0_bits & 1 == 0 {
-        return None;
-    }
-    let l1_ppn = PhysPageNum::from((l0_bits >> 12) & ((1usize << 36) - 1));
-
-    let l1_bits = unsafe { read_pte_raw(l1_ppn, 0) };
-    if l1_bits & 1 == 0 {
-        return None;
-    }
-    let l2_ppn = PhysPageNum::from((l1_bits >> 12) & ((1usize << 36) - 1));
-
-    Some(l2_ppn)
 }
 
 // ---------------------------------------------------------------------------

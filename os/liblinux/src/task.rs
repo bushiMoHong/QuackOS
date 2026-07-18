@@ -6,6 +6,20 @@
 
 use crate::fd_table::FdTable;
 
+/// Pipe ring buffer (in-memory).
+pub struct Pipe {
+    pub buf: [u8; 4096],
+    pub read_pos: usize,
+    pub write_pos: usize,
+    pub byte_count: usize,
+    /// Number of open read fds referencing this pipe.
+    pub readers: usize,
+    /// Number of open write fds referencing this pipe.
+    pub writers: usize,
+}
+
+const MAX_PIPES: usize = 16;
+
 /// Task / process control block.
 pub struct TaskStruct {
     /// File descriptor table (Linux fd → FsServer handle)
@@ -31,11 +45,15 @@ pub struct TaskStruct {
     pub line_buf: [u8; 4096],
     pub line_len: usize,
     pub line_pos: usize,
+    /// Current working directory (null-terminated).
+    pub cwd: [u8; 256],
+    /// Pipe table.
+    pub pipes: [Option<Pipe>; MAX_PIPES],
 }
 
 impl TaskStruct {
     pub fn new(initial_brk: usize) -> Self {
-        TaskStruct {
+        let mut t = TaskStruct {
             fd_table: FdTable::new(),
             brk: initial_brk,
             initial_brk,
@@ -48,7 +66,11 @@ impl TaskStruct {
             line_buf: [0; 4096],
             line_len: 0,
             line_pos: 0,
-        }
+            cwd: [0; 256],
+            pipes: [const { None }; MAX_PIPES],
+        };
+        t.cwd[0] = b'/';
+        t
     }
 
     /// Extend (or shrink) the program break.

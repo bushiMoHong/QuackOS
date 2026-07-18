@@ -332,6 +332,53 @@ pub fn free_page(phys_addr: usize) {
     }
 }
 
+/// Allocate `count` physically contiguous zeroed pages; returns the base PA.
+///
+/// The free list is LIFO with no ordering guarantee, so this pops up to 128
+/// candidate pages, scans for a contiguous run, and returns the rejects.
+/// Intended for small counts (kernel stacks); returns `None` if no run of
+/// `count` adjacent pages shows up among the candidates.
+pub fn alloc_pages_contig(count: usize) -> Option<usize> {
+    if count == 0 || count > 8 {
+        return None;
+    }
+    if count == 1 {
+        return alloc_page();
+    }
+
+    let mut held = [0usize; 128];
+    let mut n = 0;
+
+    while n < held.len() {
+        match alloc_page() {
+            Some(p) => { held[n] = p; n += 1; }
+            None => break,
+        }
+        if n < count {
+            continue;
+        }
+        held[..n].sort_unstable();
+        let mut run = 1;
+        for i in 1..n {
+            if held[i] == held[i - 1] + PAGE_SIZE { run += 1; } else { run = 1; }
+            if run == count {
+                let start_idx = i + 1 - count;
+                for (j, &p) in held[..n].iter().enumerate() {
+                    if j < start_idx || j > i {
+                        free_page(p);
+                    }
+                }
+                return Some(held[start_idx]);
+            }
+        }
+    }
+
+    for &p in &held[..n] {
+        free_page(p);
+    }
+    None
+}
+
 /// Add a contiguous range of physical memory `[start, end)` to the free list.
 ///
 /// Both `start` and `end` are automatically page-aligned before use.

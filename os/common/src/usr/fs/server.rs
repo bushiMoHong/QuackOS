@@ -2,6 +2,7 @@
 //! requests.  Single-threaded event loop + worker thread pool for block I/O.
 
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -25,12 +26,14 @@ use crate::kernel::sche::{self, block_current, IpcState};
 pub const FS_CHANNEL: u32 = 1;
 
 // Operation codes
-const OP_OPEN:   u8 = 1;
-const OP_READ:   u8 = 2;
-const OP_CLOSE:  u8 = 3;
-const OP_FSTAT:  u8 = 4;
-const OP_LSEEK:  u8 = 5;
-const OP_WRITE:  u8 = 6;
+const OP_OPEN:     u8 = 1;
+const OP_READ:     u8 = 2;
+const OP_CLOSE:    u8 = 3;
+const OP_FSTAT:    u8 = 4;
+const OP_LSEEK:    u8 = 5;
+const OP_WRITE:    u8 = 6;
+const OP_GETDENTS: u8 = 7;
+const OP_READLINK: u8 = 8;
 
 // ---------------------------------------------------------------------------
 // Kernel-internal IPC helpers
@@ -214,6 +217,40 @@ impl FsServer {
         table
             .alloc_fd(file)
             .ok_or(Errno::ENOMEM)
+    }
+
+    /// Read symlink target. Does NOT follow the last component.
+    pub fn readlink(&self, path: &str) -> Result<String, Errno> {
+        // Split into parent directory + last component
+        let (dir, name) = match path.rsplit_once('/') {
+            Some(("", name)) if path.starts_with('/') => ("/", name),
+            Some((dir, name)) if !dir.is_empty() => (dir, name),
+            Some((_, name)) => ("/", name),
+            None => return Err(Errno::EINVAL),
+        };
+
+        let (parent_dentry, _) = Self::path_walk(&self.root, dir)?;
+        let target = if let Some(child) = parent_dentry.get_child(name) {
+            child
+        } else {
+            let inode_opt = parent_dentry.inode.read();
+            if let Some(ref inode) = *inode_opt {
+                let child = inode.lookup(name, parent_dentry.clone());
+                parent_dentry
+                    .children
+                    .write()
+                    .insert(name.into(), Arc::downgrade(&child));
+                child
+            } else {
+                return Err(Errno::ENOENT);
+            }
+        };
+
+        let inode_opt = target.inode.read();
+        match *inode_opt {
+            Some(ref inode) => inode.read_link(),
+            None => Err(Errno::ENOENT),
+        }
     }
 
     /// Read from a file descriptor.
@@ -435,6 +472,42 @@ impl FsServer {
                     Ok(written) => {
                         resp[0..8].copy_from_slice(&0i64.to_le_bytes());
                         resp[8..16].copy_from_slice(&(written as u64).to_le_bytes());
+                    }
+                    Err(e) => {
+                        resp[0..8].copy_from_slice(&(-(e as i64)).to_le_bytes());
+                    }
+                }
+            }
+            OP_GETDENTS => {
+                // req: [op:u8][fd:u64 LE][count:u64 LE]
+                let fd = u64::from_le_bytes(req.get(1..9).map(|s| s.try_into().unwrap()).unwrap_or([0; 8])) as usize;
+                let count = u64::from_le_bytes(req.get(9..17).map(|s| s.try_into().unwrap()).unwrap_or([0; 8])) as usize;
+
+                match self.getdents(0, fd, count.min(48)) {
+                    Ok(entries) => {
+                        resp[0..8].copy_from_slice(&0i64.to_le_bytes());
+                        resp[8..16].copy_from_slice(&(entries.len() as u64).to_le_bytes());
+                        let copy = entries.len().min(resp.len() - 16);
+                        resp[16..16 + copy].copy_from_slice(&entries[..copy]);
+                    }
+                    Err(e) => {
+                        resp[0..8].copy_from_slice(&(-(e as i64)).to_le_bytes());
+                    }
+                }
+            }
+            OP_READLINK => {
+                // req: [op:u8][path:...]
+                let path_bytes = &req[1..];
+                let path_len = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+                let path = core::str::from_utf8(&path_bytes[..path_len]).unwrap_or("/");
+
+                match self.readlink(path) {
+                    Ok(target) => {
+                        resp[0..8].copy_from_slice(&0i64.to_le_bytes());
+                        let t = target.as_bytes();
+                        let copy = t.len().min(resp.len() - 8);
+                        resp[8..16].copy_from_slice(&(copy as u64).to_le_bytes());
+                        resp[16..16 + copy].copy_from_slice(&t[..copy]);
                     }
                     Err(e) => {
                         resp[0..8].copy_from_slice(&(-(e as i64)).to_le_bytes());

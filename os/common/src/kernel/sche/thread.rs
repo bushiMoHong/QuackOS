@@ -184,6 +184,12 @@ pub struct Thread {
     pub linux_handler_pc: Option<usize>,
     /// Per-thread save area vaddr for `LinuxContext` (§8.4).
     pub linux_save_area: Option<usize>,
+
+    // ── process / parent-child tracking ──
+    /// Parent thread (set by clone).
+    pub parent_tid: Option<ThreadId>,
+    /// Exit code (set by exit_thread, read by wait4).
+    pub exit_code: i32,
 }
 
 impl Thread {
@@ -216,6 +222,8 @@ impl Thread {
             ipc_buffer: IpcBuffer::empty(),
             linux_handler_pc: None,
             linux_save_area: None,
+            parent_tid: None,
+            exit_code: 0,
         }
     }
 
@@ -465,6 +473,28 @@ pub fn thread_exists(id: ThreadId) -> bool {
         return false;
     }
     THREAD_TABLE.lock().lookup(id).is_some()
+}
+
+/// Run a closure over all allocated threads.
+///
+/// The table lock is held for the duration of `f`.
+pub fn with_all_threads<R>(
+    f: impl FnOnce(&[Thread]) -> R,
+) -> R {
+    let table = THREAD_TABLE.lock();
+    // Collect all active threads into a temporary buffer and pass as slice.
+    // MAX_THREADS is small, so this is cheap.
+    let mut buf: [*const Thread; MAX_THREADS] = [core::ptr::null(); MAX_THREADS];
+    let mut n = 0;
+    for slot in table.slots.iter() {
+        if let Some(ref t) = slot {
+            buf[n] = t as *const Thread;
+            n += 1;
+        }
+    }
+    // SAFETY: the pointers are valid while the lock is held.
+    let slice = unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const Thread, n) };
+    f(slice)
 }
 
 /// Return the kernel stack top of a thread (for `__switch`).

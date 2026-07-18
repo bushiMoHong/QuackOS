@@ -17,6 +17,10 @@ pub enum FdKind {
     Console,
     /// FsServer-backed file.
     File(FsFid),
+    /// Pipe read end (index into TaskStruct.pipes).
+    PipeRead(usize),
+    /// Pipe write end (index into TaskStruct.pipes).
+    PipeWrite(usize),
 }
 
 /// An entry in the fd table.

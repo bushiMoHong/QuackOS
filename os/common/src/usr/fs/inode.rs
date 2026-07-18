@@ -55,4 +55,9 @@ pub trait InodeOp: Send + Sync {
 
     /// Read directory entries into a buffer.  Returns (bytes_written, file_offset).
     fn getdents(&self, buf: &mut [u8]) -> (usize, usize);
+
+    /// Read symlink target. Default returns EINVAL (not a symlink).
+    fn read_link(&self) -> Result<alloc::string::String, super::types::Errno> {
+        Err(super::types::Errno::EINVAL)
+    }
 }

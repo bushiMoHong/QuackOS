@@ -14,7 +14,7 @@
 
 use aarch64::base::config::PAGE_SIZE;
 use aarch64::base::mm::page_table::PageTable;
-use aarch64::base::mm::{alloc_page, PhysPageNum, VirtPageNum};
+use aarch64::base::mm::{alloc_page, alloc_pages_contig, PhysPageNum, VirtPageNum};
 use core::ptr::write_volatile;
 use xmas_elf::program::Type;
 use xmas_elf::ElfFile;
@@ -394,12 +394,10 @@ pub const KERNEL_STACK_SIZE: usize = 2 * PAGE_SIZE;
 ///
 /// Returns the new `ThreadId` on success.
 pub fn spawn_user_thread(entry: usize, stack_top: usize) -> Result<sche::ThreadId, &'static str> {
-    // Allocate kernel stack (2 pages)
-    let ks_pa0 = alloc_page().ok_or("OOM for kernel stack page 0")?;
-    let ks_pa1 = alloc_page().ok_or("OOM for kernel stack page 1")?;
-    let ks_base = ks_pa0;
-    let ks_top = ks_pa1 + PAGE_SIZE;
-    unsafe { core::ptr::write_bytes(ks_pa0 as *mut u8, 0, KERNEL_STACK_SIZE); }
+    // Allocate kernel stack (2 physically contiguous pages, zeroed)
+    let ks_base = aarch64::base::mm::alloc_pages_contig(2)
+        .ok_or("OOM for kernel stack")?;
+    let ks_top = ks_base + KERNEL_STACK_SIZE;
 
     // Build TrapFrame (at top - 128 - 288)
     let ctx_addr = ks_top - 128; // TaskContext
@@ -467,11 +465,9 @@ pub fn spawn_user_thread_in_as(
     ttbr0: usize,
     asid: usize,
 ) -> Result<sche::ThreadId, &'static str> {
-    let ks_pa0 = alloc_page().ok_or("OOM for kernel stack page 0")?;
-    let ks_pa1 = alloc_page().ok_or("OOM for kernel stack page 1")?;
-    let ks_base = ks_pa0;
-    let ks_top = ks_pa1 + PAGE_SIZE;
-    unsafe { core::ptr::write_bytes(ks_pa0 as *mut u8, 0, KERNEL_STACK_SIZE); }
+    let ks_base = aarch64::base::mm::alloc_pages_contig(2)
+        .ok_or("OOM for kernel stack")?;
+    let ks_top = ks_base + KERNEL_STACK_SIZE;
 
     let ctx_addr = ks_top - 128;
     let tf_addr = ctx_addr - 288;

@@ -12,12 +12,14 @@ const IPC_MAX: usize = 64;
 // ---------------------------------------------------------------------------
 // FS protocol constants (must match kernel's FsServer dispatch)
 // ---------------------------------------------------------------------------
-const OP_OPEN:   u8 = 1;
-const OP_READ:   u8 = 2;
-const OP_CLOSE:  u8 = 3;
-const OP_FSTAT:  u8 = 4;
-const OP_LSEEK:  u8 = 5;
-const OP_WRITE:  u8 = 6;  // added for Phase 1
+const OP_OPEN:     u8 = 1;
+const OP_READ:     u8 = 2;
+const OP_CLOSE:    u8 = 3;
+const OP_FSTAT:    u8 = 4;
+const OP_LSEEK:    u8 = 5;
+const OP_WRITE:    u8 = 6;
+const OP_GETDENTS: u8 = 7;
+const OP_READLINK: u8 = 8;
 
 // ---------------------------------------------------------------------------
 // FS operations
@@ -111,6 +113,48 @@ pub fn fs_fstat(fid: u64) -> Result<u64, isize> {
     let err = i64::from_le_bytes(resp[0..8].try_into().unwrap());
     if err < 0 { return Err(-err as isize); }
     Ok(u64::from_le_bytes(resp[8..16].try_into().unwrap()))
+}
+
+/// getdents64 — read directory entries.
+pub fn fs_getdents(fid: u64, buf: &mut [u8]) -> Result<usize, isize> {
+    let mut req = [0u8; IPC_MAX];
+    req[0] = OP_GETDENTS;
+    req[1..9].copy_from_slice(&fid.to_le_bytes());
+    req[9..17].copy_from_slice(&(buf.len() as u64).to_le_bytes());
+
+    let mut resp = [0u8; IPC_MAX];
+    let ret = unsafe {
+        native::ipc_call(FS_CHANNEL, req.as_ptr() as usize, IPC_MAX,
+                         resp.as_mut_ptr() as usize, IPC_MAX)
+    };
+    if ret < 0 { return Err(-ret); }
+    let err = i64::from_le_bytes(resp[0..8].try_into().unwrap());
+    if err < 0 { return Err(-err as isize); }
+    let n = u64::from_le_bytes(resp[8..16].try_into().unwrap()) as usize;
+    let copy = n.min(buf.len());
+    buf[..copy].copy_from_slice(&resp[16..16 + copy]);
+    Ok(n)
+}
+
+/// readlink — read symlink target path. Returns (target_bytes, actual_len).
+pub fn fs_readlink(path: &str, buf: &mut [u8]) -> Result<usize, isize> {
+    let mut req = [0u8; IPC_MAX];
+    req[0] = OP_READLINK;
+    let n = path.as_bytes().len().min(IPC_MAX - 1);
+    req[1..1 + n].copy_from_slice(&path.as_bytes()[..n]);
+
+    let mut resp = [0u8; IPC_MAX];
+    let ret = unsafe {
+        native::ipc_call(FS_CHANNEL, req.as_ptr() as usize, IPC_MAX,
+                         resp.as_mut_ptr() as usize, IPC_MAX)
+    };
+    if ret < 0 { return Err(-ret); }
+    let err = i64::from_le_bytes(resp[0..8].try_into().unwrap());
+    if err < 0 { return Err(-err as isize); }
+    let len = u64::from_le_bytes(resp[8..16].try_into().unwrap()) as usize;
+    let copy = len.min(buf.len());
+    buf[..copy].copy_from_slice(&resp[16..16 + copy]);
+    Ok(len)
 }
 
 /// Seek within a file.

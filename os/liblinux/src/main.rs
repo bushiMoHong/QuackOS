@@ -90,6 +90,25 @@ fn dispatch_linux_syscall(
 #[allow(static_mut_refs)]
 fn linux_syscall_handler() {
     let nr = unsafe { SAVE_AREA.regs[8] }; // x8 = Linux syscall number
+    let n = nr as usize;
+
+    // Trace key syscalls for debugging
+    unsafe {
+        if n == 64 { // write — show program output
+            let buf = SAVE_AREA.regs[1] as usize;
+            let cnt = SAVE_AREA.regs[2] as usize;
+            if cnt > 0 && buf != 0 && cnt <= 4096 {
+                native::console_write(buf as *const u8, cnt);
+            }
+        } else if n == 94 { // exit_group — show exit status
+            let code = SAVE_AREA.regs[0] as usize;
+            let hex = b"0123456789abcdef";
+            let cb = [hex[(code>>8)&0xF],hex[(code>>4)&0xF],hex[code&0xF]];
+            native::console_write(b"[exit_group ".as_ptr(), 12);
+            native::console_write(cb.as_ptr(), 3);
+            native::console_write(b"]\n".as_ptr(), 2);
+        }
+    }
     let args = unsafe {
         (
             SAVE_AREA.regs[0] as usize,

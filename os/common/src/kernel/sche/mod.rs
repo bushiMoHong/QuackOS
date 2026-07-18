@@ -66,7 +66,7 @@ pub mod thread;
 pub use context::{block_current, bootstrap_idle, current_thread, schedule, wake};
 pub use error::ScheError;
 pub use queue::{dequeue_ready, enqueue_ready, is_ready_empty, runnable_count, DEFAULT_PRIORITY, MAX_PRIORITY, NUM_PRIORITIES};
-pub use thread::{create_thread, destroy_thread, thread_count, thread_exists, with_thread, with_thread_mut, kernel_stack_top, set_kernel_stack_top, tcb_ptr, Thread, ThreadId, ThreadState};
+pub use thread::{create_thread, destroy_thread, thread_count, thread_exists, with_all_threads, with_thread, with_thread_mut, kernel_stack_top, set_kernel_stack_top, tcb_ptr, Thread, ThreadId, ThreadState};
 
 // Re-export IpcState from IPC so the sche module can use it without
 // circular dependency — sche::IpcState is the canonical name.
