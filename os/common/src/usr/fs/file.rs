@@ -64,7 +64,10 @@ impl File {
 
     pub fn getdents(&self, buf: &mut [u8]) -> (usize, usize) {
         if let Some(ref inode) = *self.dentry.inode.read() {
-            inode.getdents(buf)
+            let pos = *self.pos.read();
+            let (new_pos, written) = inode.getdents(pos, buf);
+            *self.pos.write() = new_pos;
+            (new_pos, written)
         } else {
             (0, 0)
         }

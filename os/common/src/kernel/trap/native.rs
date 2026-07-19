@@ -65,6 +65,41 @@ const ENOTSUP:  isize = 95;
 /// Called from `handle_user_sync` when ESR_EL1 indicates SVC with imm=1.
 /// The syscall number is in `tf.general.x8`.
 pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
+    let tid = crate::kernel::sche::current_thread();
+    // Enable for child thread (index 2) and FsServer (index 0) to trace exec flow
+    if tid.0 & 0xFFFF == 2 || tid.0 & 0xFFFF == 0 {
+        let name = super::native_syscall_name(nr as usize);
+        let sp: usize;
+        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
+        crate::print_uart("[N:");
+        crate::print_uart(name);
+        crate::print_uart("] tid=");
+        crate::print_uart_hex(tid.0 as u64);
+        crate::print_uart(" elr=");
+        crate::print_uart_hex(tf.elr as u64);
+        crate::print_uart(" tf=");
+        crate::print_uart_hex(tf as *const TrapFrame as u64);
+        crate::print_uart(" sp=");
+        crate::print_uart_hex(sp as u64);
+        // For linux_syscall_done, show return value and restore target
+        if nr == 9 {
+            crate::print_uart(" ret=");
+            crate::print_uart_hex(tf.general.x0 as u64);
+            let save_area = crate::kernel::sche::with_thread(tid, |t| t.linux_save_area).unwrap_or(None);
+            if let Some(sa) = save_area {
+                let ctx = unsafe { core::ptr::read_volatile(sa as *const super::LinuxContext) };
+                crate::print_uart(" linux_elr=");
+                crate::print_uart_hex(ctx.elr);
+                crate::print_uart(" linux_nr=");
+                crate::print_uart_hex(ctx.x8);
+                let lname = super::linux_syscall_name(ctx.x8 as usize);
+                crate::print_uart("(");
+                crate::print_uart(lname);
+                crate::print_uart(")");
+            }
+        }
+        crate::print_uart("\n");
+    }
     match nr {
         1  => sys_map_page(tf),
         2  => sys_unmap_page(tf),
@@ -86,6 +121,24 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
         _  => {
             tf.general.x0 = (-ENOSYS) as usize;
         }
+    }
+
+    // Debug: show final ELR after dispatch, before trap_return uses it
+    let tid = crate::kernel::sche::current_thread();
+    if tid.0 & 0xFFFF == 2 || tid.0 & 0xFFFF == 0 {
+        let sp: usize;
+        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
+        crate::print_uart("[N:done] tid=");
+        crate::print_uart_hex(tid.0 as u64);
+        crate::print_uart(" nr=");
+        crate::print_uart_hex(nr);
+        crate::print_uart(" final_elr=");
+        crate::print_uart_hex(tf.elr as u64);
+        crate::print_uart(" tf=");
+        crate::print_uart_hex(tf as *const TrapFrame as u64);
+        crate::print_uart(" sp=");
+        crate::print_uart_hex(sp as u64);
+        crate::print_uart("\n");
     }
 }
 
@@ -129,6 +182,28 @@ fn sys_map_page(tf: &mut TrapFrame) {
         return;
     }
 
+    // Build PTEFlags
+    let mut flags = aarch64::base::mm::page_table::PTEFlags::empty();
+    flags.insert(aarch64::base::mm::page_table::PTEFlags::V);
+    flags.insert(aarch64::base::mm::page_table::PTEFlags::A);
+    flags.insert(aarch64::base::mm::page_table::PTEFlags::D);
+    flags.insert(aarch64::base::mm::page_table::PTEFlags::U);
+    if prot & 1 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::R); }
+    if prot & 2 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::W); }
+    if prot & 4 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::X); }
+
+    use aarch64::base::mm::VirtPageNum;
+    let vpn = VirtPageNum::from(vaddr >> 12);
+    let mut pt = current_page_table();
+
+    // If the page is already mapped (e.g. TLS area pre-mapped by elf_loader),
+    // just update permissions — don't leak the existing physical frame.
+    if pt.find_pte(vpn).map_or(false, |pte| pte.is_valid()) {
+        pt.remap(vpn, flags);
+        tf.general.x0 = 0;
+        return;
+    }
+
     // Allocate a physical page
     let pa = match aarch64::base::mm::alloc_page() {
         Some(pa) => pa,
@@ -141,22 +216,10 @@ fn sys_map_page(tf: &mut TrapFrame) {
     // Zero the page
     unsafe { core::ptr::write_bytes(pa as *mut u8, 0, aarch64::base::config::PAGE_SIZE); }
 
-    // Build PTEFlags
-    let mut flags = aarch64::base::mm::page_table::PTEFlags::empty();
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::V);
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::A);
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::D);
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::U);
-    if prot & 1 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::R); }
-    if prot & 2 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::W); }
-    if prot & 4 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::X); }
-
     // Map into current address space
-    use aarch64::base::mm::{VirtPageNum, PhysPageNum};
-    let vpn = VirtPageNum::from(vaddr >> 12);
+    use aarch64::base::mm::PhysPageNum;
     let ppn = PhysPageNum::from(pa >> 12);
 
-    let mut pt = current_page_table();
     pt.map(vpn, ppn, flags);
 
     tf.general.x0 = 0; // success
@@ -308,16 +371,134 @@ fn sys_ipc_recv(tf: &mut TrapFrame) {
             }
         }
         RecvMatch::Parked => {
+            // Read saved_x30 BEFORE blocking to check baseline
+            {
+                let sp_before: usize;
+                let entry_x30: usize;
+                unsafe {
+                    core::arch::asm!("mov {}, sp", out(reg) sp_before);
+                    let old_sp = sp_before + 0x6F0;
+                    entry_x30 = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
+                }
+                crate::print_uart("[recv_park] tid=");
+                crate::print_uart_hex(tid.0 as u64);
+                crate::print_uart(" sp=");
+                crate::print_uart_hex(sp_before as u64);
+                crate::print_uart(" saved_x30=");
+                crate::print_uart_hex(entry_x30 as u64);
+                crate::print_uart("\n");
+            }
+            crate::print_uart("[recv] parking tid=");
+            crate::print_uart_hex(tid.0 as u64);
+            crate::print_uart(" elr=");
+            crate::print_uart_hex(tf.elr as u64);
+            crate::print_uart(" tf=");
+            crate::print_uart_hex(tf as *const TrapFrame as u64);
+            crate::print_uart("\n");
             unsafe { block_current(IpcState::BlockedOnReceive(channel_id)); }
+            // Check saved_x30 IMMEDIATELY after resume, before any other ops
+            {
+                let sp_after: usize;
+                let sx30_after: usize;
+                unsafe {
+                    core::arch::asm!("mov {}, sp", out(reg) sp_after);
+                    let old_sp = sp_after + 0x6F0;
+                    sx30_after = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
+                }
+                crate::print_uart("[recv] RESUMED tid=");
+                crate::print_uart_hex(tid.0 as u64);
+                crate::print_uart(" sp=");
+                crate::print_uart_hex(sp_after as u64);
+                crate::print_uart(" saved_x30=");
+                crate::print_uart_hex(sx30_after as u64);
+                // saved_x30 should be a kernel address in 0x4000_0000..0x4100_0000 range.
+                // If it looks like a user VA (below 64GB), dump the stack frame.
+                if sx30_after > 0 && sx30_after < 0x4000_0000 {
+                    crate::print_uart(" *** CORRUPTED! stack dump:");
+                    let base = sp_after + 0x620; // dump from somewhat before x30
+                    for i in 0..32usize {
+                        crate::print_uart("\n  [");
+                        crate::print_uart_hex((base + i * 8) as u64);
+                        crate::print_uart("] = ");
+                        let val = unsafe { core::ptr::read_volatile((base + i * 8) as *const usize) };
+                        crate::print_uart_hex(val as u64);
+                    }
+                }
+                crate::print_uart("\n");
+            }
+            crate::print_uart("[recv] pre-getbuf tid=");
+            crate::print_uart_hex(tid.0 as u64);
+            crate::print_uart(" cur=");
+            crate::print_uart_hex(crate::kernel::sche::current_thread().0 as u64);
+            crate::print_uart("\n");
             let buf = match get_ipc_buffer(tid) {
-                Ok(b) => b,
-                Err(_) => { tf.general.x0 = 0; return; }
+                Ok(b) => {
+                    crate::print_uart("[recv] gotbuf ok tid=");
+                    crate::print_uart_hex(tid.0 as u64);
+                    crate::print_uart("\n");
+                    b
+                }
+                Err(_) => {
+                    crate::print_uart("[recv] no buf tid=");
+                    crate::print_uart_hex(tid.0 as u64);
+                    crate::print_uart("\n");
+                    tf.general.x0 = 0; return;
+                }
             };
             if let Some(payload) = buf.read_short() {
+                // Check saved_x30 BEFORE unpack_short
+                {
+                    let sp_mid: usize;
+                    let sx30_mid: usize;
+                    unsafe {
+                        core::arch::asm!("mov {}, sp", out(reg) sp_mid);
+                        let old_sp = sp_mid + 0x6F0;
+                        sx30_mid = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
+                    }
+                    crate::print_uart("[recv] got payload tid=");
+                    crate::print_uart_hex(tid.0 as u64);
+                    crate::print_uart(" saved_x30=");
+                    crate::print_uart_hex(sx30_mid as u64);
+                    crate::print_uart("\n");
+                }
                 let n = unpack_short(&payload, buf_ptr, buf_len);
                 tf.general.x0 = n;
+                // Verify saved LR on stack frame
+                // sys_ipc_recv prologue: stp x29,x30,[sp,#-0x60]!; ...; sub sp,sp,#0x690
+                // Epilogue: add sp,sp,#0x690; ...; ldp x29,x30,[sp],#0x60; ret
+                // Saved x30 is at old_sp - 0x58 = (current_sp + 0x6F0) - 0x58
+                {
+                    let current_sp: usize;
+                    let saved_x30: usize;
+                    let actual_lr: usize;
+                    unsafe {
+                        core::arch::asm!(
+                            "mov {s}, sp",
+                            "mov {alr}, x30",
+                            s = out(reg) current_sp,
+                            alr = out(reg) actual_lr,
+                        );
+                    }
+                    let old_sp = current_sp + 0x6F0;
+                    unsafe {
+                        saved_x30 = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
+                    }
+                    crate::print_uart("[recv_ret] tid=");
+                    crate::print_uart_hex(tid.0 as u64);
+                    crate::print_uart(" sp=");
+                    crate::print_uart_hex(current_sp as u64);
+                    crate::print_uart(" tf=");
+                    crate::print_uart_hex(tf as *const TrapFrame as u64);
+                    crate::print_uart(" saved_x30=");
+                    crate::print_uart_hex(saved_x30 as u64);
+                    crate::print_uart(" live_x30=");
+                    crate::print_uart_hex(actual_lr as u64);
+                    crate::print_uart("\n");
+                }
             } else {
-                crate::print_uart("[R:empty]");
+                crate::print_uart("[R:empty] tid=");
+                crate::print_uart_hex(tid.0 as u64);
+                crate::print_uart("\n");
                 tf.general.x0 = 0;
             }
         }
@@ -327,12 +508,23 @@ fn sys_ipc_recv(tf: &mut TrapFrame) {
 // ---------------------------------------------------------------------------
 // 5. sys_ipc_call — synchronous IPC (send + recv on same channel)
 // ---------------------------------------------------------------------------
+// **#[inline(never)] is REQUIRED.**  If inlined into native_syscall_dispatch
+// the compiler may repurpose x19 (which holds `tf`) for something else,
+// causing `tf` to be reconstructed from a stale spill slot after the
+// block/resume cycle inside sys_ipc_recv.
+#[inline(never)]
 fn sys_ipc_call(tf: &mut TrapFrame) {
     let ch_raw = tf.general.x0 as u32;
     let send_ptr = tf.general.x1;
     let send_len = tf.general.x2;
     let recv_buf = tf.general.x3;
     let recv_len = tf.general.x4;
+
+    // Save tf pointer for debug comparison
+    let tf_ptr_before: usize = tf as *const TrapFrame as usize;
+    // Read x19 via asm to compare with Rust-level tf reference
+    let x19_before: usize;
+    unsafe { core::arch::asm!("mov {}, x19", out(reg) x19_before); }
 
     // Send phase: set up registers and call sys_ipc_send
     let saved_x0 = tf.general.x0; let saved_x1 = tf.general.x1; let saved_x2 = tf.general.x2;
@@ -344,6 +536,30 @@ fn sys_ipc_call(tf: &mut TrapFrame) {
     tf.general.x0 = ch_raw as usize; tf.general.x1 = recv_buf; tf.general.x2 = recv_len;
     sys_ipc_recv(tf);
 
+    // Minimal debug right after recv returns
+    crate::print_uart("[call_post_recv]\n");
+
+    // DEBUG: check if tf changed during recv
+    let tf_ptr_after: usize = tf as *const TrapFrame as usize;
+    let x19_after: usize;
+    unsafe { core::arch::asm!("mov {}, x19", out(reg) x19_after); }
+    let tid = crate::kernel::sche::current_thread();
+    if false && tid.0 & 0xFFFF <= 3 {
+        crate::print_uart("[ipc_call_debug] tid=");
+        crate::print_uart_hex(tid.0 as u64);
+        crate::print_uart(" tf_before=");
+        crate::print_uart_hex(tf_ptr_before as u64);
+        crate::print_uart(" tf_after=");
+        crate::print_uart_hex(tf_ptr_after as u64);
+        crate::print_uart(" x19_before=");
+        crate::print_uart_hex(x19_before as u64);
+        crate::print_uart(" x19_after=");
+        crate::print_uart_hex(x19_after as u64);
+        crate::print_uart(" elr=");
+        crate::print_uart_hex(tf.elr as u64);
+        crate::print_uart("\n");
+    }
+
     // Restore original registers (caller may need them)
     tf.general.x0 = tf.general.x0; // keep return value from recv
     tf.general.x1 = saved_x1; tf.general.x2 = saved_x2;
@@ -353,11 +569,12 @@ fn sys_ipc_call(tf: &mut TrapFrame) {
 // 6. sys_create_thread — create a new user-space thread
 // ---------------------------------------------------------------------------
 
-extern "C" fn thread_trampoline(next_sp: usize) -> ! {
-    // __switch restored this thread's context and did `ret` here.
-    // x0 (= next_sp) still points to the saved TaskContext area.
-    // The TrapFrame sits right below it (288 bytes).
-    let tf_ptr = next_sp - 288; // size_of::<TrapFrame>()
+extern "C" fn thread_trampoline(_next_sp: usize) -> ! {
+    // tf_addr was stored in x20 when the TaskContext was built.
+    // We read it via inline asm to avoid any dependency on x0,
+    // which can be clobbered between __switch's `mov x0, x1` and here.
+    let tf_ptr: usize;
+    unsafe { core::arch::asm!("mov {}, x20", out(reg) tf_ptr); }
     let ctx = unsafe { &mut *(tf_ptr as *mut crate::kernel::trap::UserContext) };
     ctx.run();
     // run() delegates to assembly run_user → trap_return → eret.
@@ -382,12 +599,12 @@ fn sys_create_thread(tf: &mut TrapFrame) {
     use crate::kernel::sche::{self, enqueue_ready};
     use core::ptr::write_volatile;
 
-    // Allocate kernel stack (2 physically contiguous pages = 8 KB, zeroed)
-    let stack_base = match aarch64::base::mm::alloc_pages_contig(2) {
+    // Allocate kernel stack (8 physically contiguous pages = 32 KB, zeroed)
+    let stack_base = match aarch64::base::mm::alloc_pages_contig(8) {
         Some(p) => p,
         None => { tf.general.x0 = (-ENOMEM) as usize; return; }
     };
-    let stack_top_ks = stack_base + 2 * PAGE_SIZE;
+    let stack_top_ks = stack_base + 8 * PAGE_SIZE;
 
     // Compute pointers within the kernel stack:
     // TaskContext (128 bytes) right below the top
@@ -421,8 +638,7 @@ fn sys_create_thread(tf: &mut TrapFrame) {
     } {
         Ok(tid) => tid,
         Err(_) => {
-            aarch64::base::mm::free_page(stack_base);
-            aarch64::base::mm::free_page(stack_base + 4096);
+            aarch64::base::mm::free_page_range(stack_base, stack_base + 8 * PAGE_SIZE);
             tf.general.x0 = (-ENOMEM) as usize;
             return;
         }
@@ -440,6 +656,7 @@ fn sys_create_thread(tf: &mut TrapFrame) {
     unsafe {
         write_volatile((ctx_addr + 0x00) as *mut usize, thread_trampoline as *const () as usize); // lr
         write_volatile((ctx_addr + 0x08) as *mut usize, tcb_addr);                   // x19 = TCB ptr
+        write_volatile((ctx_addr + 0x10) as *mut usize, tf_addr);                    // x20 = tf_addr
         write_volatile((ctx_addr + 0x70) as *mut usize, 0u64 as usize);              // ttbr1_el1 = 0
         write_volatile((ctx_addr + 0x78) as *mut usize, *crate::KERNEL_L0_PA.lock()); // ttbr0 = shared page table
     }
@@ -710,7 +927,7 @@ fn sys_clone(tf: &mut TrapFrame) {
     use crate::kernel::bmm;
     use crate::kernel::sche;
     use crate::usr::proc::elf_loader;
-    use aarch64::base::mm::{alloc_page, alloc_pages_contig, free_page, VirtAddr};
+    use aarch64::base::mm::{alloc_page, alloc_pages_contig, free_page, free_page_range, watch_pa_range, VirtAddr};
     use core::ptr::write_volatile;
 
     let flags          = tf.general.x0;
@@ -766,11 +983,64 @@ fn sys_clone(tf: &mut TrapFrame) {
     unsafe { write_volatile(child_save_pa as *mut u64, 0u64); }
 
     // ── 5. Allocate kernel stack for the child (contiguous, zeroed) ─────
-    let ks_base = match aarch64::base::mm::alloc_pages_contig(2) {
+    let ks_base = match aarch64::base::mm::alloc_pages_contig(8) {
         Some(p) => p,
         None => { tf.general.x0 = (-ENOMEM) as usize; return; }
     };
     let ks_top = ks_base + elf_loader::KERNEL_STACK_SIZE;
+
+    // DEBUG: check if VA 0x564000 maps to kernel stack range in child PT
+    {
+        let va_check = 0x564000;
+        let saved_x30_addr = ks_top - 0x5D8; // saved_x30 offset on child ks: ks_top - 416 - 0x6E0 + 0x688
+        // actually saved_x30 is at ks_base-based offset, let me scan:
+        // For child: sp at recv_ret was ~ks_top - 0x660. saved_x30 at sp + 0x688 = ks_top - 0x660 + 0x688
+        // Let's just check the page containing saved_x30
+        let saved_x30_page = saved_x30_addr & !0xFFF;
+        crate::print_uart("[clone_debug] ks_base=");
+        crate::print_uart_hex(ks_base as u64);
+        crate::print_uart(" ks_top=");
+        crate::print_uart_hex(ks_top as u64);
+        crate::print_uart(" saved_x30_est=");
+        crate::print_uart_hex(saved_x30_addr as u64);
+        crate::print_uart("\n");
+
+        // Check VA 0x564000 -> PA
+        match child_pt.translate_va_to_pa(VirtAddr::from(va_check)) {
+            Some(pa) => {
+                crate::print_uart("[clone_debug] VA 0x564000 -> PA=");
+                crate::print_uart_hex(pa as u64);
+                if pa >= ks_base && pa < ks_top {
+                    crate::print_uart(" *** ALIAS! overlaps ks ***");
+                }
+                crate::print_uart("\n");
+            }
+            None => {
+                crate::print_uart("[clone_debug] VA 0x564000 -> unmapped\n");
+            }
+        }
+
+        // Check all 32KB ks pages against user mappings (scan user VA space near 0x564000)
+        for &va in &[0x564000usize, 0x565000, 0x566000, 0x563000, 0x562000, 0x561000, 0x560000, 0x550000, 0x500000, 0x400000] {
+            if let Some(pa) = child_pt.translate_va_to_pa(VirtAddr::from(va)) {
+                if pa >= ks_base && pa < ks_top {
+                    crate::print_uart("[clone_debug] *** ALIAS: VA=");
+                    crate::print_uart_hex(va as u64);
+                    crate::print_uart(" -> PA=");
+                    crate::print_uart_hex(pa as u64);
+                    crate::print_uart(" (in ks range) ***\n");
+                }
+            }
+        }
+    }
+
+    // Register PA watch on child's kernel stack to detect any alloc/free/map touching these pages
+    watch_pa_range(ks_base, ks_top);
+    crate::print_uart("[clone] watching child ks PA [");
+    crate::print_uart_hex(ks_base as u64);
+    crate::print_uart(",");
+    crate::print_uart_hex(ks_top as u64);
+    crate::print_uart(")\n");
 
     let ctx_addr = ks_top - 128;  // TaskContext
     let tf_addr  = ctx_addr - 288; // TrapFrame below TaskContext
@@ -814,7 +1084,7 @@ fn sys_clone(tf: &mut TrapFrame) {
     let (child_asid, child_ttbr0) = match bmm::register_page_table(child_pt) {
         Some((id, token)) => (id, token),
         None => {
-            free_page(ks_base); free_page(ks_base + 4096);
+            free_page_range(ks_base, ks_base + elf_loader::KERNEL_STACK_SIZE);
             tf.general.x0 = (-ENOMEM) as usize; return;
         }
     };
@@ -826,7 +1096,7 @@ fn sys_clone(tf: &mut TrapFrame) {
         Ok(id) => id,
         Err(_) => {
             bmm::unregister_address_space(child_asid);
-            free_page(ks_base); free_page(ks_base + 4096);
+            free_page_range(ks_base, ks_base + elf_loader::KERNEL_STACK_SIZE);
             tf.general.x0 = (-ENOMEM) as usize; return;
         }
     };
@@ -836,6 +1106,7 @@ fn sys_clone(tf: &mut TrapFrame) {
     unsafe {
         write_volatile((ctx_addr + 0x00) as *mut usize, thread_trampoline_addr());
         write_volatile((ctx_addr + 0x08) as *mut usize, tcb_addr);
+        write_volatile((ctx_addr + 0x10) as *mut usize, tf_addr);      // x20 = tf_addr
         write_volatile((ctx_addr + 0x70) as *mut usize, 0usize);       // ttbr1 = 0
         write_volatile((ctx_addr + 0x78) as *mut usize, child_ttbr0);  // isolated PT
     }
@@ -892,12 +1163,20 @@ fn sys_exec(tf: &mut TrapFrame) {
     let stack_top    = tf.general.x2;
     let bootinfo_ptr = tf.general.x3;
 
+    crate::print_uart("[exec] sys_exec called ptr=");
+    crate::print_uart_hex(elf_ptr as u64);
+    crate::print_uart(" len=");
+    crate::print_uart_hex(elf_len as u64);
+    crate::print_uart("\n");
+
     // Validate
     if elf_len == 0 || elf_len > 1024 * 1024 * 16 {
+        crate::print_uart("[exec] FAIL: invalid elf_len\n");
         tf.general.x0 = (-EINVAL) as usize;
         return;
     }
     if stack_top & 0xF != 0 || stack_top >= 0x0000_8000_0000_0000 {
+        crate::print_uart("[exec] FAIL: invalid stack_top\n");
         tf.general.x0 = (-EINVAL) as usize;
         return;
     }
@@ -921,7 +1200,11 @@ fn sys_exec(tf: &mut TrapFrame) {
     // Create a new page table with kernel identity mappings
     let mut pt = match bmm::create_kernel_mapped_page_table() {
         Ok(pt) => pt,
-        Err(_) => { tf.general.x0 = (-ENOMEM) as usize; return; }
+        Err(_) => {
+            crate::print_uart("[exec] FAIL: create_kernel_mapped_page_table\n");
+            tf.general.x0 = (-ENOMEM) as usize;
+            return;
+        }
     };
 
     // Clone only the liblinux image into the new AS — the old program's
@@ -930,24 +1213,41 @@ fn sys_exec(tf: &mut TrapFrame) {
     let lib_start = *LIBLINUX_VA_START.lock();
     let lib_end   = *LIBLINUX_VA_END.lock();
     if lib_entry == 0 || lib_start >= lib_end {
+        crate::print_uart("[exec] FAIL: invalid liblinux range\n");
         tf.general.x0 = (-ENOMEM) as usize;
         return;
     }
 
+    crate::print_uart("[exec] liblinux range [");
+    crate::print_uart_hex(lib_start as u64);
+    crate::print_uart(",");
+    crate::print_uart_hex(lib_end as u64);
+    crate::print_uart(") entry=");
+    crate::print_uart_hex(lib_entry as u64);
+    crate::print_uart("\n");
+
     let current_tid = crate::kernel::sche::current_thread();
     let old_asid_val = crate::kernel::sche::with_thread(current_tid, |t| t.asid).unwrap_or(0);
+    crate::print_uart("[exec] old_asid=");
+    crate::print_uart_hex(old_asid_val as u64);
+    crate::print_uart("\n");
+
     if old_asid_val != 0 {
         let old_asid = bmm::AddressSpaceId(old_asid_val);
         let _ = bmm::with_page_table_mut(old_asid, |old_pt| {
             bmm::clone_user_range(old_pt, &mut pt, lib_start, lib_end)
         });
+        crate::print_uart("[exec] liblinux cloned\n");
     }
 
     // Load the new Linux ELF into the page table
+    crate::print_uart("[exec] loading new ELF...\n");
     if let Err(_) = elf_loader::load_elf_bytes(&mut pt, &elf_buf) {
+        crate::print_uart("[exec] FAIL: load_elf_bytes\n");
         tf.general.x0 = (-EINVAL) as usize;
         return;
     }
+    crate::print_uart("[exec] ELF loaded OK\n");
 
     // Map user stack
     elf_loader::map_user_stack(&mut pt);
@@ -955,15 +1255,30 @@ fn sys_exec(tf: &mut TrapFrame) {
     // Write BootInfo into the new AS at BOOTINFO_VA
     let boot_pa = match pt.translate_va_to_pa(aarch64::base::mm::VirtAddr::from(BOOTINFO_VA)) {
         Some(pa) => pa,
-        None => { tf.general.x0 = (-ENOMEM) as usize; return; }
+        None => {
+            crate::print_uart("[exec] FAIL: BOOTINFO_VA not mapped\n");
+            tf.general.x0 = (-ENOMEM) as usize;
+            return;
+        }
     };
     unsafe { core::ptr::write_volatile(boot_pa as *mut BootInfo, bootinfo); }
+    crate::print_uart("[exec] BootInfo written pa=");
+    crate::print_uart_hex(boot_pa as u64);
+    crate::print_uart("\n");
 
     // Register new AS
     let (new_asid, new_ttbr0) = match bmm::register_page_table(pt) {
         Some((id, token)) => (id, token),
-        None => { tf.general.x0 = (-ENOMEM) as usize; return; }
+        None => {
+            crate::print_uart("[exec] FAIL: register_page_table\n");
+            tf.general.x0 = (-ENOMEM) as usize; return;
+        }
     };
+    crate::print_uart("[exec] new AS registered asid=");
+    crate::print_uart_hex(new_asid.0 as u64);
+    crate::print_uart(" ttbr0=");
+    crate::print_uart_hex(new_ttbr0 as u64);
+    crate::print_uart("\n");
 
     // Update current thread's AS
     let _ = crate::kernel::sche::with_thread_mut(current_tid, |t| {
@@ -991,6 +1306,10 @@ fn sys_exec(tf: &mut TrapFrame) {
 
     // Switch to the new TTBR0 and flush TLB BEFORE freeing the old AS.
     // The old page table pages must not be walked after they are freed.
+    crate::print_uart("[exec] switching TTBR0, eret to liblinux _start=");
+    crate::print_uart_hex(lib_entry as u64);
+    crate::print_uart("\n");
+
     unsafe {
         core::arch::asm!(
             "msr ttbr0_el1, {ttbr}",
@@ -1000,6 +1319,27 @@ fn sys_exec(tf: &mut TrapFrame) {
             "isb",
             ttbr = in(reg) new_ttbr0,
         );
+    }
+
+    // Detach liblinux PTEs from the old page table BEFORE freeing it.
+    // `clone_user_range` deep-copied these pages into the new PT with
+    // different physical pages.  The old PTEs are stale — clear them so
+    // no stale mapping survives into any page that gets reused later.
+    if old_asid_val != 0 {
+        let old_asid = bmm::AddressSpaceId(old_asid_val);
+        let _ = bmm::with_page_table_mut(old_asid, |old_pt| {
+            use aarch64::base::mm::VirtPageNum;
+            let page_size = aarch64::base::config::PAGE_SIZE;
+            let mut va = lib_start & !(page_size - 1);
+            let end = (lib_end + page_size - 1) & !(page_size - 1);
+            while va < end {
+                let vpn = VirtPageNum::from(va >> 12);
+                if old_pt.find_pte(vpn).map_or(false, |pte| pte.is_valid()) {
+                    old_pt.unmap(vpn);
+                }
+                va += page_size;
+            }
+        });
     }
 
     // Now safe to free the old AS — TTBR0 points to the new one.

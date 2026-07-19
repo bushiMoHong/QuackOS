@@ -330,7 +330,7 @@ impl FsServer {
         let file = table.get_file(fd).ok_or(Errno::EBADF)?;
         if file.dentry.flags.read().contains(DentryFlags::DIRECTORY) {
             let mut buf = vec![0u8; count];
-            let (n, _) = file.getdents(&mut buf);
+            let (_, n) = file.getdents(&mut buf);
             buf.truncate(n);
             Ok(buf)
         } else {

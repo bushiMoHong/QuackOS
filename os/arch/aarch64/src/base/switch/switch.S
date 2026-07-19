@@ -63,17 +63,14 @@ __switch:
     ldp  x28, fp,  [x1, #0x50]
 
     // ── 3. Switch page tables ─────────────────────────────────────────────
-    tlbi vmalle1is
-    dsb  ish
+    ldp  x9, x10, [x1, #0x70]   // 同时读取 ttbr1 (x9) 和 ttbr0 (x10)
+    msr  ttbr1_el1, x9
+    msr  ttbr0_el1, x10
+
     isb
 
-    //    Restore TTBR1 (kernel page table root)
-    ldr  x9, [x1, #0x70]
-    msr  ttbr1_el1, x9
-
-    //    Restore TTBR0 (user / isolation page table root)
-    ldr  x9, [x1, #0x78]
-    msr  ttbr0_el1, x9
+    tlbi vmalle1is
+    dsb  ish
     isb
 
     // ── 4. Set up the new thread's environment ────────────────────────────

@@ -384,8 +384,8 @@ pub fn map_user_stack_at(pt: &mut PageTable, stack_bottom: usize, pages: usize) 
 // Thread spawning
 // ---------------------------------------------------------------------------
 
-/// Kernel stack size in bytes (2 × 4 KiB pages).
-pub const KERNEL_STACK_SIZE: usize = 2 * PAGE_SIZE;
+/// Kernel stack size in bytes (8 × 4 KiB pages = 32 KiB).
+pub const KERNEL_STACK_SIZE: usize = 8 * PAGE_SIZE;
 
 /// Spawn a user-mode thread at `entry` with the given user `stack_top`.
 ///
@@ -395,7 +395,7 @@ pub const KERNEL_STACK_SIZE: usize = 2 * PAGE_SIZE;
 /// Returns the new `ThreadId` on success.
 pub fn spawn_user_thread(entry: usize, stack_top: usize) -> Result<sche::ThreadId, &'static str> {
     // Allocate kernel stack (2 physically contiguous pages, zeroed)
-    let ks_base = aarch64::base::mm::alloc_pages_contig(2)
+    let ks_base = aarch64::base::mm::alloc_pages_contig(8)
         .ok_or("OOM for kernel stack")?;
     let ks_top = ks_base + KERNEL_STACK_SIZE;
 
@@ -444,6 +444,7 @@ pub fn spawn_user_thread(entry: usize, stack_top: usize) -> Result<sche::ThreadI
     unsafe {
         write_volatile((ctx_addr + 0x00) as *mut usize, thread_trampoline_addr());
         write_volatile((ctx_addr + 0x08) as *mut usize, tcb_addr);
+        write_volatile((ctx_addr + 0x10) as *mut usize, tf_addr); // x20 = tf_addr
         write_volatile((ctx_addr + 0x70) as *mut usize, ttbr1);
         write_volatile((ctx_addr + 0x78) as *mut usize, ttbr0);
     }
@@ -465,7 +466,7 @@ pub fn spawn_user_thread_in_as(
     ttbr0: usize,
     asid: usize,
 ) -> Result<sche::ThreadId, &'static str> {
-    let ks_base = aarch64::base::mm::alloc_pages_contig(2)
+    let ks_base = aarch64::base::mm::alloc_pages_contig(8)
         .ok_or("OOM for kernel stack")?;
     let ks_top = ks_base + KERNEL_STACK_SIZE;
 
@@ -492,6 +493,7 @@ pub fn spawn_user_thread_in_as(
     unsafe {
         write_volatile((ctx_addr + 0x00) as *mut usize, thread_trampoline_addr());
         write_volatile((ctx_addr + 0x08) as *mut usize, tcb_addr);
+        write_volatile((ctx_addr + 0x10) as *mut usize, tf_addr); // x20 = tf_addr
         write_volatile((ctx_addr + 0x70) as *mut usize, 0usize);  // ttbr1 = 0
         write_volatile((ctx_addr + 0x78) as *mut usize, ttbr0);   // isolated page table
     }

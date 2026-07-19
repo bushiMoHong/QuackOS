@@ -177,12 +177,6 @@ pub fn copy_short(
     buf.write_short(sender, payload);
     put_ipc_buffer(target_tid, buf)?;
 
-    log::debug!(
-        "short ipc: pid={} → tid={}, {} words",
-        sender,
-        target_tid,
-        payload.len
-    );
     Ok(())
 }
 

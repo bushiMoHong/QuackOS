@@ -32,6 +32,83 @@ use core::fmt;
 use core::ptr;
 use spin::Mutex;
 
+// ---------------------------------------------------------------------------
+// PA watch — detect operations on watched physical page ranges
+// (used to catch kernel stack corruption / aliasing bugs)
+// ---------------------------------------------------------------------------
+
+const UART_DR: *mut u8 = 0x09000000 as *mut u8;
+
+fn uart_putc(c: u8) {
+    unsafe { ptr::write_volatile(UART_DR, c); }
+}
+
+fn uart_puts(s: &str) {
+    for &b in s.as_bytes() {
+        uart_putc(b);
+    }
+}
+
+fn uart_puthex(mut v: u64) {
+    uart_puts("0x");
+    if v == 0 {
+        uart_putc(b'0');
+        return;
+    }
+    let mut started = false;
+    for shift in (0..16).rev() {
+        let nibble = ((v >> (shift * 4)) & 0xF) as u8;
+        if nibble != 0 || started {
+            started = true;
+            uart_putc(if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) });
+        }
+    }
+}
+
+struct WatchRange {
+    start: usize,
+    end: usize,
+}
+
+const EMPTY_WATCH: Option<WatchRange> = None;
+static WATCH_RANGES: Mutex<[Option<WatchRange>; 4]> = Mutex::new([EMPTY_WATCH; 4]);
+
+/// Register a physical address range to watch for alloc/free/map violations.
+pub fn watch_pa_range(start: usize, end: usize) {
+    let mut slots = WATCH_RANGES.lock();
+    for slot in slots.iter_mut() {
+        if slot.is_none() {
+            *slot = Some(WatchRange { start, end });
+            return;
+        }
+    }
+    uart_puts("[WATCH] no free slot!\n");
+}
+
+/// Check whether `pa` falls within any watched range.  Call this inside
+/// `alloc_page`, `free_page`, and page-table `map`.
+pub fn check_watch_pa(pa: usize, op: &str) {
+    let slots = WATCH_RANGES.lock();
+    for (i, slot) in slots.iter().enumerate() {
+        if let Some(ref r) = *slot {
+            let page_start = pa & !(PAGE_SIZE - 1);
+            if page_start >= r.start && page_start < r.end {
+                uart_puts("\n[WATCH#");
+                uart_puthex(i as u64);
+                uart_puts("] ");
+                uart_puts(op);
+                uart_puts(" pa=");
+                uart_puthex(pa as u64);
+                uart_puts(" range=[");
+                uart_puthex(r.start as u64);
+                uart_puts(",");
+                uart_puthex(r.end as u64);
+                uart_puts(")\n");
+            }
+        }
+    }
+}
+
 pub mod page_table;
 
 // ---------------------------------------------------------------------------
@@ -312,7 +389,10 @@ pub fn alloc_page() -> Option<usize> {
         let ptr = head as *mut u8;
         ptr::write_bytes(ptr, 0, PAGE_SIZE);
 
-        Some(head as usize)
+        let pa = head as usize;
+        drop(list);
+        check_watch_pa(pa, "alloc_page");
+        Some(pa)
     }
 }
 
@@ -323,6 +403,7 @@ pub fn alloc_page() -> Option<usize> {
 /// The page must have been obtained from `alloc_page()` and not already freed.
 pub fn free_page(phys_addr: usize) {
     let addr = phys_addr & !(PAGE_SIZE - 1); // align down
+    check_watch_pa(addr, "free_page");
     let mut list = FREE_LIST.lock();
     unsafe {
         let node = addr as *mut FreePage;

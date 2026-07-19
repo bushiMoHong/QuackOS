@@ -50,10 +50,9 @@ impl InodeOp for Ext4Inode {
         inner.inode_on_disk.get_size() as usize
     }
 
-    fn getdents(&self, buf: &mut [u8]) -> (usize, usize) {
-        // Call the internal getdents starting from offset 0
-        match self.getdents(buf, 0) {
-            Ok((file_off, buf_off)) => (file_off, buf_off),
+    fn getdents(&self, offset: usize, buf: &mut [u8]) -> (usize, usize) {
+        match self.getdents(buf, offset) {
+            Ok((file_off, buf_off)) => (offset + file_off, buf_off),
             Err(_) => (0, 0),
         }
     }

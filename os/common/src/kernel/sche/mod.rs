@@ -91,21 +91,24 @@ pub fn init() {
         thread::MAX_THREADS,
     );
 
-    // Create a boot thread TCB so the boot thread can block on IPC, etc.
-    //
-    // The boot thread already has a kernel stack (set up by boot assembly).
-    // We allocate a small stack area for TCB tracking purposes — the actual
-    // stack pointer is saved/restored by __switch automatically.
-    let boot_stack_pa = aarch64::base::mm::alloc_page().expect("OOM for boot TCB stack");
-    let boot_stack_top = boot_stack_pa + aarch64::base::config::PAGE_SIZE;
+    // The boot thread (FsServer) runs on the boot stack defined in
+    // boot_arm64.S (256 KB in .bss.stack).  Register it as the boot
+    // thread's kernel stack so the TCB tracks the correct base address
+    // and the sp validation passes.
+    extern "C" {
+        static boot_stack: u8;
+        static boot_stack_top: u8;
+    }
+    let boot_stack_base = unsafe { &boot_stack as *const u8 as usize };
+    let boot_stack_top_addr = unsafe { &boot_stack_top as *const u8 as usize };
 
     let tid = unsafe {
         thread::create_thread(
-            128,        // default priority
-            boot_stack_pa,
-            boot_stack_top,
-            0,          // ttbr0
-            0,          // asid
+            128,                    // default priority
+            boot_stack_base,        // kernel_stack_base = boot stack
+            boot_stack_top_addr,    // kernel_stack_top  = top of boot stack
+            0,                      // ttbr0
+            0,                      // asid
         )
     }.expect("Failed to create boot thread TCB");
 

@@ -147,6 +147,83 @@ pub fn schedule() {
     // 6. Read the next thread's kernel stack pointer and current TCB address.
     let next_sp = thread::kernel_stack_top(next_tid);
     let current_tcb = unsafe { thread::tcb_ptr(current_tid) } as usize;
+    let nxt_base = thread::with_thread(next_tid, |t| t.kernel_stack_base).unwrap_or(0);
+    let cur_base = thread::with_thread(current_tid, |t| t.kernel_stack_base).unwrap_or(0);
+
+    // Validate next_sp is within the next thread's kernel stack.
+    // Boot stack is 256 KB (64 pages); regular stacks are 32 KB (8 pages).
+    // If corrupted, the next thread will resume with a foreign stack → disaster.
+    if nxt_base != 0 && (next_sp < nxt_base || next_sp >= nxt_base + 64 * 4096) {
+        crate::print_uart("\n*** PANIC: corrupted kernel_stack_top for next thread! ***\n");
+        crate::print_uart("[VALIDATE] next_sp=");
+        crate::print_uart_hex(next_sp as u64);
+        crate::print_uart(" nxt_base=");
+        crate::print_uart_hex(nxt_base as u64);
+        crate::print_uart(" nxt_end=");
+        crate::print_uart_hex((nxt_base + 64 * 4096) as u64);
+        crate::print_uart(" nxt_tid=");
+        crate::print_uart_hex(next_tid.0 as u64);
+        crate::print_uart(" cur_tid=");
+        crate::print_uart_hex(current_tid.0 as u64);
+        crate::print_uart("\n");
+        // Also dump the TCB raw bytes at offset 0 to see what's stored
+        let tcb_addr = unsafe { thread::tcb_ptr(next_tid) } as usize;
+        let raw_top = unsafe { core::ptr::read_volatile(tcb_addr as *const usize) };
+        crate::print_uart("[VALIDATE] TCB raw[0]=");
+        crate::print_uart_hex(raw_top as u64);
+        crate::print_uart(" tcb=");
+        crate::print_uart_hex(tcb_addr as u64);
+        crate::print_uart(" ks_base=");
+        crate::print_uart_hex(nxt_base as u64);
+        crate::print_uart("\n");
+    }
+
+    // Validate current sp is within current thread's kernel stack
+    {
+        let sp: usize;
+        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
+        if !current_tid.is_null() && cur_base != 0 && (sp < cur_base || sp >= cur_base + 64 * 4096) {
+            crate::print_uart("\n*** PANIC: sp outside current kernel stack! ***\n");
+            crate::print_uart("[VALIDATE] sp=");
+            crate::print_uart_hex(sp as u64);
+            crate::print_uart(" cur_base=");
+            crate::print_uart_hex(cur_base as u64);
+            crate::print_uart(" cur_end=");
+            crate::print_uart_hex((cur_base + 64 * 4096) as u64);
+            crate::print_uart(" cur_tid=");
+            crate::print_uart_hex(current_tid.0 as u64);
+            crate::print_uart("\n");
+        }
+    }
+
+    // DBG: only print when child thread involved
+    if current_tid.0 & 0xFFFF <= 3 || next_tid.0 & 0xFFFF <= 3 {
+        let cur_base = thread::with_thread(current_tid, |t| t.kernel_stack_base).unwrap_or(0);
+        let cur_top  = thread::with_thread(current_tid, |t| t.kernel_stack_top).unwrap_or(0);
+        let nxt_base = thread::with_thread(next_tid, |t| t.kernel_stack_base).unwrap_or(0);
+        let nxt_saved = thread::with_thread(next_tid, |t| t.kernel_stack_top).unwrap_or(0);
+        let sp: usize;
+        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
+        crate::print_uart("[SW] cur=");
+        crate::print_uart_hex(current_tid.0 as u64);
+        crate::print_uart(" sp=");
+        crate::print_uart_hex(sp as u64);
+        crate::print_uart(" ks=");
+        crate::print_uart_hex(cur_base as u64);
+        crate::print_uart("-");
+        crate::print_uart_hex((cur_base + 64 * 4096) as u64);
+        crate::print_uart(" tcb=");
+        crate::print_uart_hex(current_tcb as u64);
+        crate::print_uart(" nxt=");
+        crate::print_uart_hex(next_tid.0 as u64);
+        crate::print_uart(" nxt_sp=");
+        crate::print_uart_hex(next_sp as u64);
+        crate::print_uart(" nxt_ks=");
+        crate::print_uart_hex(nxt_base as u64);
+        crate::print_uart("-");
+        crate::print_uart_hex((nxt_base + 64 * 4096) as u64);
+        crate::print_uart("\n");
+    }
 
     // 7. Context switch — **no locks held from this point**.
     //
@@ -159,6 +236,36 @@ pub fn schedule() {
     //   released — no deadlock risk.
     unsafe {
         __switch(current_tcb, next_sp);
+    }
+
+    // DBG: SP after resume — validate for ALL threads
+    {
+        let tid = current_thread();
+        let sp: usize;
+        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
+        if tid.0 & 0xFFFF <= 3 {
+            crate::print_uart("[SW:back] tid=");
+            crate::print_uart_hex(tid.0 as u64);
+            crate::print_uart(" sp=");
+            crate::print_uart_hex(sp as u64);
+            crate::print_uart("\n");
+        }
+        // Validate sp is within the resumed thread's kernel stack
+        if !tid.is_null() {
+            let base = thread::with_thread(tid, |t| t.kernel_stack_base).unwrap_or(0);
+            if base != 0 && (sp < base || sp >= base + 64 * 4096) {
+                crate::print_uart("\n*** PANIC: sp outside own kernel stack AFTER resume! ***\n");
+                crate::print_uart("[SW:back:ERR] tid=");
+                crate::print_uart_hex(tid.0 as u64);
+                crate::print_uart(" sp=");
+                crate::print_uart_hex(sp as u64);
+                crate::print_uart(" base=");
+                crate::print_uart_hex(base as u64);
+                crate::print_uart(" end=");
+                crate::print_uart_hex((base + 64 * 4096) as u64);
+                crate::print_uart("\n");
+            }
+        }
     }
 
     // Execution resumes here when another thread switches **back** to us.

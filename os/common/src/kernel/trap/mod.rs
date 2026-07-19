@@ -217,6 +217,22 @@ pub fn reflect_linux_syscall(tf: &mut TrapFrame) {
         core::ptr::write_volatile(dst.add(33), tf.sp as u64);
     }
 
+    // Debug: track Linux syscalls made by user threads
+    {
+        let tid = sche::current_thread();
+        if tid.0 & 0xFFFF <= 3 {
+            let nr = tf.general.x8 as usize;
+            let name = linux_syscall_name(nr);
+            uart_puts("[L:");
+            uart_puts(name);
+            uart_puts("] tid=");
+            uart_put_hex(tid.0 as u64);
+            uart_puts(" elr=");
+            uart_put_hex(tf.elr as u64);
+            uart_puts("\n");
+        }
+    }
+
     // Redirect execution to liblinux handler
     tf.elr = handler_pc;
     tf.general.x0 = save_area;

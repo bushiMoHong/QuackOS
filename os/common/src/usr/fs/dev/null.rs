@@ -45,7 +45,7 @@ impl InodeOp for NullInode {
     fn get_size(&self) -> usize {
         0
     }
-    fn getdents(&self, _buf: &mut [u8]) -> (usize, usize) {
+    fn getdents(&self, _offset: usize, _buf: &mut [u8]) -> (usize, usize) {
         (0, 0)
     }
 }

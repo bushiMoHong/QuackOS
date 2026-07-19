@@ -65,14 +65,9 @@ trap_from_user:
     mrs     x1, sp_el0
     stp     x1, x2, [sp, #24]         // 填入用户态的 sp 和 tpidr
 
-    mov     x20, sp
-    mrs     x2, tpidr_el1
-    mov     sp, x2                    // 切换到事先准备好的内核栈
-
-    mov     x0, x20
+    mov     x0, sp
     bl      trap_handler
 
-    mov     sp, x20
     b       trap_return
 
 
@@ -142,15 +137,9 @@ __vectors:
 
 .global run_user
 run_user:
-    // Save kernel stack pointer BEFORE pushing callee-saved regs,
-    // so trap_from_user switches to a safe distance above TrapFrame.
-    //
-    // Subtract 1024 to leave headroom — trap_handler's call chain
-    // (handle_user_sync → reflect_linux_syscall → etc.) needs stack
-    // space WITHOUT overwriting the TrapFrame placed just below.
-    mov     x1, sp
-    sub     x1, x1, #1024
-    msr     tpidr_el1, x1
+    // tpidr_el1 is no longer used for stack switching (see trap_from_user).
+    // The TrapFrame lives at a fixed offset from SP_EL1 and the kernel stack
+    // (32 KB) provides enough headroom for trap_handler's entire call chain.
 
     stp     x29, x30, [sp, #-16]!
     stp     x27, x28, [sp, #-16]!

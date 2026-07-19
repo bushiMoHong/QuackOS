@@ -525,6 +525,7 @@ impl PageTable {
 
     /// Map `vpn` → `ppn` with the given logical flags.
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
+        super::check_watch_pa(PhysAddr::from(ppn).0, "map");
         let pte = self.find_pte_create(vpn).expect("PageTable::map: out of memory");
         *pte = PageTableEntry::new(ppn, flags);
         tlb_invalidate_addr(VirtAddr::from(vpn));
