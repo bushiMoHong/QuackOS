@@ -34,6 +34,7 @@ pub mod error;
 pub use allocator::{retype, RetypeError};
 pub use cspace::{
     create_cspace, destroy_cspace, cspace_exists,
+    insert_cap, insert_cap_at, lookup_cap, remove_cap,
     lookup_call_right, lookup_recv_right, lookup_send_right,
     CNode, CSpace, CPtr, CSLOT_COUNT,
 };

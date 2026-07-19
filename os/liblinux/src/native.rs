@@ -28,6 +28,11 @@ const SYS_IRQ_REGISTER:          u64 = 21;
 const SYS_IRQ_ACK:               u64 = 22;
 const SYS_IPC_RECV_TIMEOUT:      u64 = 23;
 const SYS_IPC_CALL_TIMEOUT:      u64 = 24;
+const SYS_CSPACE_MINT:           u64 = 25;
+const SYS_CSPACE_DERIVE:         u64 = 26;
+const SYS_CSPACE_REVOKE:         u64 = 27;
+const SYS_CSPACE_MOVE:           u64 = 28;
+const SYS_CSPACE_DELETE:         u64 = 29;
 
 /// Issue a native (SVC #1) syscall with up to 4 arguments.
 /// Returns x0.
@@ -227,4 +232,44 @@ pub unsafe fn ipc_call_timeout(
     recv_buf: usize, recv_len: usize, timeout_ms: u32,
 ) -> isize {
     svc1_6(SYS_IPC_CALL_TIMEOUT, ch as usize, send_ptr, send_len, recv_buf, recv_len, timeout_ms as usize) as isize
+}
+
+// ---------------------------------------------------------------------------
+// CSpace syscall wrappers
+// ---------------------------------------------------------------------------
+
+/// Mint a root capability and insert it into the caller's CSpace.
+/// cap_type: 0=Untyped, 1=Endpoint, 2=Thread, 3=PageTable, 4=Frame, 5=Notification, 6=CNode
+/// Returns cptr on success, negative errno on failure.
+#[inline(always)]
+pub unsafe fn cspace_mint(obj_id: usize, cap_type: u8, rights: u16) -> isize {
+    svc1(SYS_CSPACE_MINT, obj_id, cap_type as usize, rights as usize, 0) as isize
+}
+
+/// Derive a child capability with reduced rights.
+/// Returns dest_cptr on success, negative errno on failure.
+#[inline(always)]
+pub unsafe fn cspace_derive(src_cptr: usize, new_rights: u16) -> isize {
+    svc1(SYS_CSPACE_DERIVE, src_cptr, new_rights as usize, 0, 0) as isize
+}
+
+/// Revoke a capability and all its descendants.
+/// Returns 0 on success, negative errno on failure.
+#[inline(always)]
+pub unsafe fn cspace_revoke(cptr: usize) -> isize {
+    svc1(SYS_CSPACE_REVOKE, cptr, 0, 0, 0) as isize
+}
+
+/// Move a capability from src slot to dest slot.
+/// Returns 0 on success, negative errno on failure.
+#[inline(always)]
+pub unsafe fn cspace_move(src_cptr: usize, dest_cptr: usize) -> isize {
+    svc1(SYS_CSPACE_MOVE, src_cptr, dest_cptr, 0, 0) as isize
+}
+
+/// Delete a capability from a CSpace slot.
+/// Returns 0 on success, negative errno on failure.
+#[inline(always)]
+pub unsafe fn cspace_delete(cptr: usize) -> isize {
+    svc1(SYS_CSPACE_DELETE, cptr, 0, 0, 0) as isize
 }

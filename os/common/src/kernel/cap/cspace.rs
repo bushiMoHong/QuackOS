@@ -82,6 +82,13 @@ impl CNode {
         Err(CapError::CNodeFull)
     }
 
+    /// Insert a capability at a specific slot (overwrites any existing cap).
+    pub(crate) fn insert_at(&mut self, cptr: CPtr, cap: Capability) -> Result<(), CapError> {
+        let slot = self.slots.get_mut(cptr.0).ok_or(CapError::InvalidCPtr)?;
+        *slot = Some(cap);
+        Ok(())
+    }
+
     /// Remove a capability from a slot.
     pub(crate) fn remove(&mut self, cptr: CPtr) -> Result<Capability, CapError> {
         let slot = self
@@ -132,6 +139,11 @@ impl CSpace {
     /// Insert a capability and return its CPtr.
     pub fn insert(&mut self, cap: Capability) -> Result<CPtr, CapError> {
         self.root.insert(cap)
+    }
+
+    /// Insert a capability at a specific CPtr slot.
+    pub fn insert_at(&mut self, cptr: CPtr, cap: Capability) -> Result<(), CapError> {
+        self.root.insert_at(cptr, cap)
     }
 
     /// Remove and return a capability by CPtr.
@@ -263,6 +275,11 @@ fn with_cspace<R>(
 /// Insert a capability into a process's CSpace and return its CPtr.
 pub fn insert_cap(pid: ProcessId, cap: Capability) -> Result<CPtr, CapError> {
     with_cspace_mut(pid, |cs| cs.insert(cap))
+}
+
+/// Insert a capability at a specific CPtr slot.
+pub fn insert_cap_at(pid: ProcessId, cptr: CPtr, cap: Capability) -> Result<(), CapError> {
+    with_cspace_mut(pid, |cs| cs.insert_at(cptr, cap))
 }
 
 /// Remove a capability from a process's CSpace.

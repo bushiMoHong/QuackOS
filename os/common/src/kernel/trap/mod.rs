@@ -339,6 +339,11 @@ fn native_syscall_name(nr: usize) -> &'static str {
         22 => "irq_ack",
         23 => "ipc_recv_timeout",
         24 => "ipc_call_timeout",
+        25 => "cspace_mint",
+        26 => "cspace_derive",
+        27 => "cspace_revoke",
+        28 => "cspace_move",
+        29 => "cspace_delete",
         _  => "?",
     }
 }

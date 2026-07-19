@@ -36,6 +36,11 @@
 //! | 23 | sys_ipc_recv_timeout       | endpoint_cptr | buf_ptr    | buf_len   | timeout_ms|
 //! | 24 | sys_ipc_call_timeout       | endpoint_cptr | send_ptr   | send_len  | recv_buf  |
 //! |    |                            | recv_len      | timeout_ms |           |           |
+//! | 25 | sys_cspace_mint            | obj_id        | cap_type   | rights    | –         |
+//! | 26 | sys_cspace_derive          | src_cptr      | new_rights | –         | –         |
+//! | 27 | sys_cspace_revoke          | cptr          | –          | –         | –         |
+//! | 28 | sys_cspace_move            | src_cptr      | dest_cptr  | –         | –         |
+//! | 29 | sys_cspace_delete          | cptr          | –          | –         | –         |
 
 use super::{LinuxContext, TrapFrame};
 
@@ -61,6 +66,7 @@ const EINVAL:   isize = 22;
 const ENOMEM:   isize = 12;
 const ENOSYS:   isize = 38;
 const EBADF:    isize = 9;
+const EACCES:   isize = 13;
 const EEXIST:   isize = 17;
 const ENOTSUP:  isize = 95;
 
@@ -133,6 +139,11 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
         22 => sys_irq_ack(tf),
         23 => sys_ipc_recv_timeout(tf),
         24 => sys_ipc_call_timeout(tf),
+        25 => sys_cspace_mint(tf),
+        26 => sys_cspace_derive(tf),
+        27 => sys_cspace_revoke(tf),
+        28 => sys_cspace_move(tf),
+        29 => sys_cspace_delete(tf),
         _  => {
             tf.general.x0 = (-ENOSYS) as usize;
         }
@@ -1632,4 +1643,164 @@ fn sys_ipc_call_timeout(tf: &mut TrapFrame) {
     // Restore original registers
     tf.general.x1 = saved_x1; tf.general.x2 = saved_x2;
     tf.general.x3 = saved_x3; tf.general.x4 = saved_x4;
+}
+
+// ---------------------------------------------------------------------------
+// 25. sys_cspace_mint — create a root capability and insert into CSpace
+// ---------------------------------------------------------------------------
+// args: x0 = obj_id, x1 = cap_type (u8), x2 = rights (u16)
+// returns: x0 = cptr on success, negative errno on failure
+fn sys_cspace_mint(tf: &mut TrapFrame) {
+    let obj_id = tf.general.x0;
+    let cap_type_raw = tf.general.x1 as u8;
+    let rights_raw = tf.general.x2 as u16;
+
+    let cap_type = match cap_type_from_u8(cap_type_raw) {
+        Some(ct) => ct,
+        None => { tf.general.x0 = (-EINVAL) as usize; return; }
+    };
+
+    let pid: crate::kernel::ipc::message::ProcessId = crate::kernel::sche::current_thread().0;
+
+    let cap = match crate::kernel::cap::mint_cap(
+        obj_id,
+        cap_type,
+        crate::kernel::cap::CapRights(rights_raw),
+        pid,
+    ) {
+        Ok(c) => c,
+        Err(e) => { tf.general.x0 = cap_errno(e) as usize; return; }
+    };
+
+    match crate::kernel::cap::insert_cap(pid, cap) {
+        Ok(cptr) => tf.general.x0 = cptr.0,
+        Err(e) => tf.general.x0 = cap_errno(e) as usize,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 26. sys_cspace_derive — derive a child capability with reduced rights
+// ---------------------------------------------------------------------------
+// args: x0 = src_cptr, x1 = new_rights (u16)
+// returns: x0 = dest_cptr on success, negative errno on failure
+fn sys_cspace_derive(tf: &mut TrapFrame) {
+    let src_cptr = crate::kernel::cap::CPtr(tf.general.x0);
+    let new_rights = crate::kernel::cap::CapRights(tf.general.x1 as u16);
+
+    let pid: crate::kernel::ipc::message::ProcessId = crate::kernel::sche::current_thread().0;
+
+    let parent_cap = match crate::kernel::cap::lookup_cap(pid, src_cptr) {
+        Ok(c) => c,
+        Err(e) => { tf.general.x0 = cap_errno(e) as usize; return; }
+    };
+
+    let derived = match crate::kernel::cap::derive_cap(&parent_cap, new_rights, pid) {
+        Ok(c) => c,
+        Err(e) => { tf.general.x0 = derive_errno(e) as usize; return; }
+    };
+
+    match crate::kernel::cap::insert_cap(pid, derived) {
+        Ok(cptr) => tf.general.x0 = cptr.0,
+        Err(e) => tf.general.x0 = cap_errno(e) as usize,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 27. sys_cspace_revoke — revoke a capability and all descendants
+// ---------------------------------------------------------------------------
+// args: x0 = cptr
+// returns: x0 = 0 on success, negative errno on failure
+fn sys_cspace_revoke(tf: &mut TrapFrame) {
+    let cptr = crate::kernel::cap::CPtr(tf.general.x0);
+    let pid: crate::kernel::ipc::message::ProcessId = crate::kernel::sche::current_thread().0;
+
+    let cap = match crate::kernel::cap::lookup_cap(pid, cptr) {
+        Ok(c) => c,
+        Err(e) => { tf.general.x0 = cap_errno(e) as usize; return; }
+    };
+
+    // Revoke in the derivation tree first
+    if let Err(e) = crate::kernel::cap::revoke(&cap) {
+        tf.general.x0 = cap_errno(e) as usize;
+        return;
+    }
+
+    // Then remove from CSpace
+    match crate::kernel::cap::remove_cap(pid, cptr) {
+        Ok(_) => tf.general.x0 = 0,
+        Err(e) => tf.general.x0 = cap_errno(e) as usize,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 28. sys_cspace_move — move a capability from one slot to another
+// ---------------------------------------------------------------------------
+// args: x0 = src_cptr, x1 = dest_cptr
+// returns: x0 = 0 on success, negative errno on failure
+fn sys_cspace_move(tf: &mut TrapFrame) {
+    let src_cptr = crate::kernel::cap::CPtr(tf.general.x0);
+    let dest_cptr = crate::kernel::cap::CPtr(tf.general.x1);
+    let pid: crate::kernel::ipc::message::ProcessId = crate::kernel::sche::current_thread().0;
+
+    let cap = match crate::kernel::cap::remove_cap(pid, src_cptr) {
+        Ok(c) => c,
+        Err(e) => { tf.general.x0 = cap_errno(e) as usize; return; }
+    };
+
+    match crate::kernel::cap::insert_cap_at(pid, dest_cptr, cap) {
+        Ok(()) => tf.general.x0 = 0,
+        Err(e) => tf.general.x0 = cap_errno(e) as usize,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 29. sys_cspace_delete — delete a capability from a slot
+// ---------------------------------------------------------------------------
+// args: x0 = cptr
+// returns: x0 = 0 on success, negative errno on failure
+fn sys_cspace_delete(tf: &mut TrapFrame) {
+    let cptr = crate::kernel::cap::CPtr(tf.general.x0);
+    let pid: crate::kernel::ipc::message::ProcessId = crate::kernel::sche::current_thread().0;
+
+    match crate::kernel::cap::remove_cap(pid, cptr) {
+        Ok(_) => tf.general.x0 = 0,
+        Err(e) => tf.general.x0 = cap_errno(e) as usize,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error mapping helpers
+// ---------------------------------------------------------------------------
+
+fn cap_type_from_u8(v: u8) -> Option<crate::kernel::cap::CapType> {
+    match v {
+        0 => Some(crate::kernel::cap::CapType::Untyped),
+        1 => Some(crate::kernel::cap::CapType::Endpoint),
+        2 => Some(crate::kernel::cap::CapType::Thread),
+        3 => Some(crate::kernel::cap::CapType::PageTable),
+        4 => Some(crate::kernel::cap::CapType::Frame),
+        5 => Some(crate::kernel::cap::CapType::Notification),
+        6 => Some(crate::kernel::cap::CapType::CNode),
+        _ => None,
+    }
+}
+
+fn cap_errno(e: crate::kernel::cap::CapError) -> isize {
+    use crate::kernel::cap::CapError;
+    match e {
+        CapError::InvalidCPtr | CapError::EmptySlot => EBADF,
+        CapError::RightsEscalation | CapError::Revoked | CapError::GrantChainBroken => EACCES,
+        CapError::WrongCapType | CapError::InvalidProcess | CapError::InvalidArgument => EINVAL,
+        CapError::CSpaceFull | CapError::CNodeFull
+        | CapError::UntypedTooSmall | CapError::UntypedExhausted => ENOMEM,
+        CapError::NotImplemented => ENOSYS,
+    }
+}
+
+fn derive_errno(e: crate::kernel::cap::DeriveError) -> isize {
+    use crate::kernel::cap::DeriveError;
+    match e {
+        DeriveError::RightsEscalation | DeriveError::ParentRevoked => EACCES,
+        DeriveError::TableFull => ENOMEM,
+    }
 }
