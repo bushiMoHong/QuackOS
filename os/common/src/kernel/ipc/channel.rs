@@ -113,6 +113,29 @@ impl WaitQueue {
     pub(crate) fn is_empty(&self) -> bool {
         self.count == 0
     }
+
+    /// Remove the entry for a specific thread from the queue.
+    pub(crate) fn remove_by_tid(&mut self, tid: ThreadId) {
+        // Linear scan — queue is small (max 32 entries).
+        for i in 0..WAIT_QUEUE_CAP {
+            let idx = (self.head + i) % WAIT_QUEUE_CAP;
+            if self.items[idx].as_ref().is_some_and(|e| e.thread_id == tid) {
+                self.items[idx] = None;
+                self.count -= 1;
+                // Compact: shift subsequent elements forward to fill the gap.
+                // We need to shift from head..tail-1 to close the hole.
+                let mut cur = idx;
+                let mut next = (cur + 1) % WAIT_QUEUE_CAP;
+                while cur != self.tail && next != self.tail {
+                    self.items[cur] = self.items[next].take();
+                    cur = next;
+                    next = (cur + 1) % WAIT_QUEUE_CAP;
+                }
+                self.tail = cur;
+                return;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +226,11 @@ impl ChannelInner {
                 .map_err(|_| IpcError::ChannelTableFull)?;
             Ok(SendMatch::Parked)
         }
+    }
+
+    /// Remove a receiver from the wait queue (used on IPC timeout).
+    pub fn cancel_receive(&mut self, tid: ThreadId) {
+        self.receiver_queue.remove_by_tid(tid);
     }
 
     /// Try to match an incoming receiver against a waiting sender.

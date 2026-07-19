@@ -88,6 +88,7 @@ pub(crate) static KERNEL_L2_LOW_PA: spin::Mutex<usize> = spin::Mutex::new(0);
 /// ```text
 /// L0[0] → L1
 ///   L1[0] → L2 (VA 0x0–0x3FFF_FFFF)
+///     L2[0x40] = 2MB device block for GIC   (VA 0x08000000)
 ///     L2[0x48] = 2MB device block for UART  (VA 0x09000000)
 ///     L2[0x50] = 2MB device block for virtio (VA 0x0A000000)
 ///     (remaining L2 entries: free for user L3 tables)
@@ -155,6 +156,7 @@ fn setup_mmu() {
             | 0b01
     }
     unsafe {
+        l2_lo.add(0x40).write_volatile(device_block(0x08000000)); // GIC
         l2_lo.add(0x48).write_volatile(device_block(0x09000000)); // UART
         l2_lo.add(0x50).write_volatile(device_block(0x0A000000)); // VirtIO
     }
@@ -245,6 +247,16 @@ pub extern "C" fn rust_main() -> ! {
     // 5. Initialise the scheduler.
     kernel::sche::init();
     print_uart("Scheduler initialised.\n");
+
+    // 5.5. Initialise the IRQ subsystem.
+    kernel::irq::init();
+
+    // 5.6. Enable IRQs at the CPU level (clear DAIF.I).
+    // Must be done after GIC init (in trap::init) and trap handler install.
+    unsafe {
+        trap::irq_enable();
+    }
+    print_uart("IRQs enabled.\n");
 
     // 6. Run the init process — load and execute /bin/bash.
     usr::init::run_init();

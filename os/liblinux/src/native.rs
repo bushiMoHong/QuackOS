@@ -24,6 +24,10 @@ const SYS_WAIT4:                 u64 = 17;
 const SYS_CREATE_NOTIFICATION:   u64 = 18;
 const SYS_NOTIFY_SEND:           u64 = 19;
 const SYS_NOTIFY_WAIT:           u64 = 20;
+const SYS_IRQ_REGISTER:          u64 = 21;
+const SYS_IRQ_ACK:               u64 = 22;
+const SYS_IPC_RECV_TIMEOUT:      u64 = 23;
+const SYS_IPC_CALL_TIMEOUT:      u64 = 24;
 
 /// Issue a native (SVC #1) syscall with up to 4 arguments.
 /// Returns x0.
@@ -47,6 +51,19 @@ pub unsafe fn svc1_5(nr: u64, a0: usize, a1: usize, a2: usize, a3: usize, a4: us
         "svc #1",
         in("x8") nr,
         in("x0") a0, in("x1") a1, in("x2") a2, in("x3") a3, in("x4") a4,
+        lateout("x0") ret,
+    );
+    ret
+}
+
+/// Issue a native (SVC #1) syscall with 6 arguments.
+#[inline(always)]
+pub unsafe fn svc1_6(nr: u64, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> usize {
+    let ret: usize;
+    asm!(
+        "svc #1",
+        in("x8") nr,
+        in("x0") a0, in("x1") a1, in("x2") a2, in("x3") a3, in("x4") a4, in("x5") a5,
         lateout("x0") ret,
     );
     ret
@@ -176,4 +193,38 @@ pub unsafe fn notify_send(nid: u32) -> isize {
 #[inline(always)]
 pub unsafe fn notify_wait(nid: u32) -> isize {
     svc1(SYS_NOTIFY_WAIT, nid as usize, 0, 0, 0) as isize
+}
+
+/// Register a hardware IRQ line.  Creates a Notification and returns its ID
+/// on success.  Use `notify_wait` to block until the IRQ fires, then call
+/// `irq_ack` after handling.
+/// Returns notification_id (>=0) on success, negative errno on failure.
+#[inline(always)]
+pub unsafe fn irq_register(irq_num: u32) -> isize {
+    svc1(SYS_IRQ_REGISTER, irq_num as usize, 0, 0, 0) as isize
+}
+
+/// Acknowledge (EOI) a hardware IRQ.  Must be called after the IRQ is
+/// handled to re-enable the line in the GIC.
+/// Returns 0 on success, negative errno on failure.
+#[inline(always)]
+pub unsafe fn irq_ack(irq_num: u32) -> isize {
+    svc1(SYS_IRQ_ACK, irq_num as usize, 0, 0, 0) as isize
+}
+
+/// Receive an IPC message with timeout.
+/// Returns bytes read on success, -ETIMEDOUT (110) on timeout, negative errno on failure.
+#[inline(always)]
+pub unsafe fn ipc_recv_timeout(ch: u32, buf_ptr: usize, buf_len: usize, timeout_ms: u32) -> isize {
+    svc1(SYS_IPC_RECV_TIMEOUT, ch as usize, buf_ptr, buf_len, timeout_ms as usize) as isize
+}
+
+/// Synchronous IPC (send + recv) with timeout on the receive phase.
+/// Returns bytes read on success, -ETIMEDOUT (110) on timeout, negative errno on failure.
+#[inline(always)]
+pub unsafe fn ipc_call_timeout(
+    ch: u32, send_ptr: usize, send_len: usize,
+    recv_buf: usize, recv_len: usize, timeout_ms: u32,
+) -> isize {
+    svc1_6(SYS_IPC_CALL_TIMEOUT, ch as usize, send_ptr, send_len, recv_buf, recv_len, timeout_ms as usize) as isize
 }

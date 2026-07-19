@@ -39,6 +39,8 @@ pub enum IpcState {
     BlockedOnCall(ChannelId),
     /// Blocked waiting for an asynchronous notification.
     BlockedOnNotify(NotificationId),
+    /// IPC operation timed out.
+    TimedOut,
 }
 
 impl IpcState {

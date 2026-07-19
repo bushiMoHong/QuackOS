@@ -335,6 +335,10 @@ fn native_syscall_name(nr: usize) -> &'static str {
         18 => "create_notification",
         19 => "notify_send",
         20 => "notify_wait",
+        21 => "irq_register",
+        22 => "irq_ack",
+        23 => "ipc_recv_timeout",
+        24 => "ipc_call_timeout",
         _  => "?",
     }
 }
@@ -452,11 +456,8 @@ impl TrapHandler for CommonTrapHandler {
         }
     }
 
-    fn handle_user_irq(tf: &mut TrapFrame) {
-        // TODO
-        // 读取中断控制器的状态 (例如 GIC)，判断是 Timer 还是外设
-        // 如果是 Timer -> 触发调度器 sched::yield()
-        // 如果是 磁盘/网卡 -> 触发相应的驱动回调
+    fn handle_user_irq(_tf: &mut TrapFrame) {
+        crate::kernel::irq::dispatch_irq();
     }
 
     fn handle_kernel_sync(tf: &mut TrapFrame) {

@@ -31,6 +31,11 @@
 //! | 18 | sys_create_notification    | –             | –          | –         | –         |
 //! | 19 | sys_notify_send            | notify_id     | –          | –         | –         |
 //! | 20 | sys_notify_wait            | notify_id     | –          | –         | –         |
+//! | 21 | sys_irq_register           | irq_num       | –          | –         | –         |
+//! | 22 | sys_irq_ack                | irq_num       | –          | –         | –         |
+//! | 23 | sys_ipc_recv_timeout       | endpoint_cptr | buf_ptr    | buf_len   | timeout_ms|
+//! | 24 | sys_ipc_call_timeout       | endpoint_cptr | send_ptr   | send_len  | recv_buf  |
+//! |    |                            | recv_len      | timeout_ms |           |           |
 
 use super::{LinuxContext, TrapFrame};
 
@@ -124,6 +129,10 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
         18 => sys_create_notification(tf),
         19 => sys_notify_send(tf),
         20 => sys_notify_wait(tf),
+        21 => sys_irq_register(tf),
+        22 => sys_irq_ack(tf),
+        23 => sys_ipc_recv_timeout(tf),
+        24 => sys_ipc_call_timeout(tf),
         _  => {
             tf.general.x0 = (-ENOSYS) as usize;
         }
@@ -1488,4 +1497,139 @@ fn sys_notify_wait(tf: &mut TrapFrame) {
         Ok(()) => tf.general.x0 = 0,
         Err(_) => tf.general.x0 = (-EBADF) as usize,
     }
+}
+
+// ---------------------------------------------------------------------------
+// 21. sys_irq_register — register an IRQ line and create a notification
+// ---------------------------------------------------------------------------
+// args: x0 = irq_num
+// returns: x0 = notification_id on success, negative errno on failure
+fn sys_irq_register(tf: &mut TrapFrame) {
+    let irq_num = tf.general.x0 as u32;
+    match crate::kernel::irq::register_irq(irq_num) {
+        Ok(nid) => tf.general.x0 = nid.0 as usize,
+        Err(e) => tf.general.x0 = e as usize,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 22. sys_irq_ack — acknowledge (EOI) an IRQ line
+// ---------------------------------------------------------------------------
+// args: x0 = irq_num
+// returns: x0 = 0 on success, negative errno on failure
+fn sys_irq_ack(tf: &mut TrapFrame) {
+    let irq_num = tf.general.x0 as u32;
+    match crate::kernel::irq::ack_irq(irq_num) {
+        Ok(()) => tf.general.x0 = 0,
+        Err(e) => tf.general.x0 = e as usize,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 23. sys_ipc_recv_timeout — receive with timeout
+// ---------------------------------------------------------------------------
+// args: x0 = channel_id, x1 = buf_ptr, x2 = buf_len, x3 = timeout_ms
+// returns: x0 = bytes read on success, negative errno on failure
+fn sys_ipc_recv_timeout(tf: &mut TrapFrame) {
+    let ch_raw = tf.general.x0 as u32;
+    let buf_ptr = tf.general.x1;
+    let buf_len = tf.general.x2;
+    let timeout_ms = tf.general.x3 as u32;
+
+    const ETIMEDOUT: isize = 110;
+
+    let channel_id = crate::kernel::ipc::channel::ChannelId(ch_raw);
+    let tid = crate::kernel::sche::current_thread();
+    use crate::kernel::ipc::channel::{with_channel, RecvMatch};
+    use crate::kernel::ipc::{deliver, wake, get_ipc_buffer};
+    use crate::kernel::sche::{block_current, IpcState};
+    use crate::kernel::ipc::message::Message;
+
+    let action = match with_channel(channel_id, |inner| inner.match_receiver(tid)) {
+        Ok(a) => a,
+        Err(_) => { tf.general.x0 = (-EBADF) as usize; return; }
+    };
+
+    match action {
+        RecvMatch::Matched(sender_entry) => {
+            let msg = sender_entry.msg.unwrap_or_else(|| {
+                Message::new_short(
+                    0,
+                    crate::kernel::ipc::message::ShortPayload { words: [0; 32], len: 0 }
+                )
+            });
+            let sender_tid = sender_entry.thread_id;
+            let _ = deliver(&msg, tid, None, None);
+            wake(sender_tid);
+
+            if let Message::Short(_, ref payload) = msg {
+                tf.general.x0 = unpack_short(payload, buf_ptr, buf_len);
+            } else {
+                tf.general.x0 = 0;
+            }
+        }
+        RecvMatch::Parked => {
+            if timeout_ms > 0 {
+                crate::kernel::timer::set_ipc_timeout(tid, timeout_ms);
+            }
+            unsafe { block_current(IpcState::BlockedOnReceive(channel_id)); }
+
+            let timed_out = crate::kernel::sche::with_thread(tid, |t| {
+                matches!(t.ipc_state, IpcState::TimedOut)
+            }).unwrap_or(false);
+
+            if timed_out {
+                let _ = with_channel(channel_id, |inner| {
+                    inner.cancel_receive(tid);
+                    Ok(())
+                });
+                tf.general.x0 = (-ETIMEDOUT) as usize;
+                return;
+            }
+
+            crate::kernel::timer::cancel_ipc_timeout(tid);
+
+            let buf = match get_ipc_buffer(tid) {
+                Ok(b) => b,
+                Err(_) => { tf.general.x0 = 0; return; }
+            };
+            if let Some(payload) = buf.read_short() {
+                let n = unpack_short(&payload, buf_ptr, buf_len);
+                tf.general.x0 = n;
+            } else {
+                tf.general.x0 = 0;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 24. sys_ipc_call_timeout — synchronous IPC (send + recv) with timeout
+// ---------------------------------------------------------------------------
+// args: x0 = channel_id, x1 = send_ptr, x2 = send_len, x3 = recv_buf,
+//       x4 = recv_len, x5 = timeout_ms
+#[inline(never)]
+fn sys_ipc_call_timeout(tf: &mut TrapFrame) {
+    let ch_raw = tf.general.x0 as u32;
+    let send_ptr = tf.general.x1;
+    let send_len = tf.general.x2;
+    let recv_buf = tf.general.x3;
+    let recv_len = tf.general.x4;
+    let timeout_ms = tf.general.x5 as u32;
+
+    // Send phase
+    let saved_x0 = tf.general.x0; let saved_x1 = tf.general.x1; let saved_x2 = tf.general.x2;
+    let saved_x3 = tf.general.x3; let saved_x4 = tf.general.x4;
+    tf.general.x0 = ch_raw as usize; tf.general.x1 = send_ptr; tf.general.x2 = send_len;
+    sys_ipc_send(tf);
+    if tf.general.x0 != 0 { return; }
+
+    // Receive phase with timeout
+    tf.general.x0 = ch_raw as usize; tf.general.x1 = recv_buf; tf.general.x2 = recv_len;
+    tf.general.x3 = timeout_ms as usize;
+    sys_ipc_recv_timeout(tf);
+
+    // Restore original registers
+    tf.general.x1 = saved_x1; tf.general.x2 = saved_x2;
+    tf.general.x3 = saved_x3; tf.general.x4 = saved_x4;
 }

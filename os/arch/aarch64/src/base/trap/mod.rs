@@ -87,6 +87,9 @@ pub unsafe fn init() {
         fn __vectors();
     }
     core::arch::asm!("msr VBAR_EL1, {}", in(reg) __vectors as *const () as usize);
+
+    // Initialise the GICv2 interrupt controller.
+    crate::base::gic::gic_init();
 }
 
 // ---------------------------------------------------------------------------

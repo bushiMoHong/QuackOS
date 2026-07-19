@@ -185,6 +185,10 @@ pub struct Thread {
     /// Per-thread save area vaddr for `LinuxContext` (§8.4).
     pub linux_save_area: Option<usize>,
 
+    // ── IPC timeout ──
+    /// Deadline in CNTPCT ticks for the current IPC operation (0 = no timeout).
+    pub ipc_deadline: u64,
+
     // ── process / parent-child tracking ──
     /// Parent thread (set by clone).
     pub parent_tid: Option<ThreadId>,
@@ -222,6 +226,7 @@ impl Thread {
             ipc_buffer: IpcBuffer::empty(),
             linux_handler_pc: None,
             linux_save_area: None,
+            ipc_deadline: 0,
             parent_tid: None,
             exit_code: 0,
         }
