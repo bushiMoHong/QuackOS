@@ -18,6 +18,7 @@
 //! calling `block_current()`.
 
 use super::channel::{ChannelId, ThreadId};
+use super::notification::NotificationId;
 
 // ---------------------------------------------------------------------------
 // IPC thread state
@@ -37,7 +38,7 @@ pub enum IpcState {
     /// Sent a message and blocked waiting for a reply.
     BlockedOnCall(ChannelId),
     /// Blocked waiting for an asynchronous notification.
-    BlockedOnNotify(ChannelId),
+    BlockedOnNotify(NotificationId),
 }
 
 impl IpcState {

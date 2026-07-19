@@ -21,6 +21,9 @@ const SYS_CLONE:                 u64 = 14;
 const SYS_CONSOLE_READ:          u64 = 15;
 const SYS_EXEC:                  u64 = 16;
 const SYS_WAIT4:                 u64 = 17;
+const SYS_CREATE_NOTIFICATION:   u64 = 18;
+const SYS_NOTIFY_SEND:           u64 = 19;
+const SYS_NOTIFY_WAIT:           u64 = 20;
 
 /// Issue a native (SVC #1) syscall with up to 4 arguments.
 /// Returns x0.
@@ -151,4 +154,26 @@ pub unsafe fn wait4() -> (isize, usize) {
         out("x1") x1,
     );
     (x0 as isize, x1)
+}
+
+/// Create a notification object.  Returns NotificationId (>=0) on success,
+/// negative errno on failure.
+#[inline(always)]
+pub unsafe fn create_notification() -> isize {
+    svc1(SYS_CREATE_NOTIFICATION, 0, 0, 0, 0) as isize
+}
+
+/// Signal (post) a notification.  Wakes a waiter or sets the signaled flag.
+/// Returns 0 on success, negative errno on failure.
+#[inline(always)]
+pub unsafe fn notify_send(nid: u32) -> isize {
+    svc1(SYS_NOTIFY_SEND, nid as usize, 0, 0, 0) as isize
+}
+
+/// Wait (pend) on a notification until it is signaled.
+/// Returns immediately if the notification is already signaled.
+/// Returns 0 on success, negative errno on failure.
+#[inline(always)]
+pub unsafe fn notify_wait(nid: u32) -> isize {
+    svc1(SYS_NOTIFY_WAIT, nid as usize, 0, 0, 0) as isize
 }

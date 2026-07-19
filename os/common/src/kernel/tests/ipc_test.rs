@@ -5,6 +5,7 @@ use crate::kernel::ipc::channel::{
 };
 use crate::kernel::ipc::error::IpcError;
 use crate::kernel::ipc::message::{MemoryMapPayload, Message, MessageType, ShortPayload};
+use crate::kernel::ipc::notification::NotificationId;
 use crate::kernel::ipc::synchronization::IpcState;
 use crate::kernel::ipc::transfer::IpcBuffer;
 use crate::kernel::sche::ThreadId;
@@ -122,7 +123,7 @@ fn f_state_blocked() -> bool {
     IpcState::BlockedOnSend(ChannelId(1)).is_blocked()
         && IpcState::BlockedOnReceive(ChannelId(2)).is_blocked()
         && IpcState::BlockedOnCall(ChannelId(3)).is_blocked()
-        && IpcState::BlockedOnNotify(ChannelId(4)).is_blocked()
+        && IpcState::BlockedOnNotify(NotificationId(4)).is_blocked()
 }
 fn f_state_eq() -> bool {
     IpcState::Ready == IpcState::Ready

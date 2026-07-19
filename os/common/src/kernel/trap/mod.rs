@@ -332,6 +332,9 @@ fn native_syscall_name(nr: usize) -> &'static str {
         15 => "console_read",
         16 => "exec",
         17 => "wait4",
+        18 => "create_notification",
+        19 => "notify_send",
+        20 => "notify_wait",
         _  => "?",
     }
 }

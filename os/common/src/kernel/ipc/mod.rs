@@ -42,6 +42,7 @@ pub mod capability;
 pub mod channel;
 pub mod error;
 pub mod message;
+pub mod notification;
 pub mod synchronization;
 pub mod transfer;
 
@@ -62,6 +63,10 @@ pub use message::{
     MessageType, ProcessId, ShortPayload, UnmapRequest,
 };
 pub use synchronization::{block_current, current_thread, wake, IpcState};
+pub use notification::{
+    create_notification, destroy_notification, notification_exists,
+    signal_notification, wait_on_notification, NotificationId,
+};
 pub use transfer::{
     copy_capability, copy_memory_map, copy_short, deliver, get_ipc_buffer,
     IpcBuffer, IPC_BUFFER_SIZE,

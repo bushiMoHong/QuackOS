@@ -28,6 +28,9 @@
 //! | 16 | sys_exec                   | elf_ptr       | elf_len    | stack_top | bootinfo  |
 //! |    |                            |               |            |           | ptr       |
 //! | 17 | sys_wait4                  | –             | –          | –         | –         |
+//! | 18 | sys_create_notification    | –             | –          | –         | –         |
+//! | 19 | sys_notify_send            | notify_id     | –          | –         | –         |
+//! | 20 | sys_notify_wait            | notify_id     | –          | –         | –         |
 
 use super::{LinuxContext, TrapFrame};
 
@@ -118,6 +121,9 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
         15 => sys_console_read(tf),
         16 => sys_exec(tf),
         17 => sys_wait4(tf),
+        18 => sys_create_notification(tf),
+        19 => sys_notify_send(tf),
+        20 => sys_notify_wait(tf),
         _  => {
             tf.general.x0 = (-ENOSYS) as usize;
         }
@@ -1444,4 +1450,42 @@ fn sys_console_read(tf: &mut TrapFrame) {
         n += 1;
     }
     tf.general.x0 = n;
+}
+
+// ---------------------------------------------------------------------------
+// 18. sys_create_notification — create a new notification object
+// ---------------------------------------------------------------------------
+// args: none
+// returns: x0 = notification_id on success, negative errno on failure
+fn sys_create_notification(tf: &mut TrapFrame) {
+    match crate::kernel::ipc::notification::create_notification() {
+        Ok(nid) => tf.general.x0 = nid.0 as usize,
+        Err(_) => tf.general.x0 = (-ENOMEM) as usize,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 19. sys_notify_send — signal (post) a notification
+// ---------------------------------------------------------------------------
+// args: x0 = notification_id
+// returns: x0 = 0 on success, negative errno on failure
+fn sys_notify_send(tf: &mut TrapFrame) {
+    let nid = crate::kernel::ipc::notification::NotificationId(tf.general.x0 as u32);
+    match crate::kernel::ipc::notification::signal_notification(nid) {
+        Ok(()) => tf.general.x0 = 0,
+        Err(_) => tf.general.x0 = (-EBADF) as usize,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 20. sys_notify_wait — wait (pend) on a notification
+// ---------------------------------------------------------------------------
+// args: x0 = notification_id
+// returns: x0 = 0 on success (after being signaled), negative errno on failure
+fn sys_notify_wait(tf: &mut TrapFrame) {
+    let nid = crate::kernel::ipc::notification::NotificationId(tf.general.x0 as u32);
+    match crate::kernel::ipc::notification::wait_on_notification(nid) {
+        Ok(()) => tf.general.x0 = 0,
+        Err(_) => tf.general.x0 = (-EBADF) as usize,
+    }
 }
