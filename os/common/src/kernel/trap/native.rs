@@ -80,40 +80,43 @@ const ENOTSUP:  isize = 95;
 /// The syscall number is in `tf.general.x8`.
 pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
     let tid = crate::kernel::sche::current_thread();
-    // Enable for child thread (index 2) and FsServer (index 0) to trace exec flow
+    // Syscall tracing disabled for quiet production output.
+    // Enable the block below to debug syscall dispatch.
+    /*
     if tid.0 & 0xFFFF == 2 || tid.0 & 0xFFFF == 0 {
         let name = super::native_syscall_name(nr as usize);
         let sp: usize;
         unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
-        crate::print_uart("[N:");
-        crate::print_uart(name);
-        crate::print_uart("] tid=");
-        crate::print_uart_hex(tid.0 as u64);
-        crate::print_uart(" elr=");
-        crate::print_uart_hex(tf.elr as u64);
-        crate::print_uart(" tf=");
-        crate::print_uart_hex(tf as *const TrapFrame as u64);
-        crate::print_uart(" sp=");
-        crate::print_uart_hex(sp as u64);
+        // crate::print_uart("[N:");
+        // crate::print_uart(name);
+        // crate::print_uart("] tid=");
+        // crate::print_uart_hex(tid.0 as u64);
+        // crate::print_uart(" elr=");
+        // crate::print_uart_hex(tf.elr as u64);
+        // crate::print_uart(" tf=");
+        // crate::print_uart_hex(tf as *const TrapFrame as u64);
+        // crate::print_uart(" sp=");
+        // crate::print_uart_hex(sp as u64);
         // For linux_syscall_done, show return value and restore target
         if nr == 9 {
-            crate::print_uart(" ret=");
-            crate::print_uart_hex(tf.general.x0 as u64);
+            // crate::print_uart(" ret=");
+            // crate::print_uart_hex(tf.general.x0 as u64);
             let save_area = crate::kernel::sche::with_thread(tid, |t| t.linux_save_area).unwrap_or(None);
             if let Some(sa) = save_area {
                 let ctx = unsafe { core::ptr::read_volatile(sa as *const super::LinuxContext) };
-                crate::print_uart(" linux_elr=");
-                crate::print_uart_hex(ctx.elr);
-                crate::print_uart(" linux_nr=");
-                crate::print_uart_hex(ctx.x8);
+                // crate::print_uart(" linux_elr=");
+                // crate::print_uart_hex(ctx.elr);
+                // crate::print_uart(" linux_nr=");
+                // crate::print_uart_hex(ctx.x8);
                 let lname = super::linux_syscall_name(ctx.x8 as usize);
-                crate::print_uart("(");
-                crate::print_uart(lname);
-                crate::print_uart(")");
+                // crate::print_uart("(");
+                // crate::print_uart(lname);
+                // crate::print_uart(")");
             }
         }
         crate::print_uart("\n");
     }
+    */
     match nr {
         1  => sys_map_page(tf),
         2  => sys_unmap_page(tf),
@@ -154,17 +157,17 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
     if tid.0 & 0xFFFF == 2 || tid.0 & 0xFFFF == 0 {
         let sp: usize;
         unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
-        crate::print_uart("[N:done] tid=");
-        crate::print_uart_hex(tid.0 as u64);
-        crate::print_uart(" nr=");
-        crate::print_uart_hex(nr);
-        crate::print_uart(" final_elr=");
-        crate::print_uart_hex(tf.elr as u64);
-        crate::print_uart(" tf=");
-        crate::print_uart_hex(tf as *const TrapFrame as u64);
-        crate::print_uart(" sp=");
-        crate::print_uart_hex(sp as u64);
-        crate::print_uart("\n");
+        // crate::print_uart("[N:done] tid=");
+        // crate::print_uart_hex(tid.0 as u64);
+        // crate::print_uart(" nr=");
+        // crate::print_uart_hex(nr);
+        // crate::print_uart(" final_elr=");
+        // crate::print_uart_hex(tf.elr as u64);
+        // crate::print_uart(" tf=");
+        // crate::print_uart_hex(tf as *const TrapFrame as u64);
+        // crate::print_uart(" sp=");
+        // crate::print_uart_hex(sp as u64);
+        // crate::print_uart("\n");
     }
 }
 
@@ -406,21 +409,21 @@ fn sys_ipc_recv(tf: &mut TrapFrame) {
                     let old_sp = sp_before + 0x6F0;
                     entry_x30 = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
                 }
-                crate::print_uart("[recv_park] tid=");
-                crate::print_uart_hex(tid.0 as u64);
-                crate::print_uart(" sp=");
-                crate::print_uart_hex(sp_before as u64);
-                crate::print_uart(" saved_x30=");
-                crate::print_uart_hex(entry_x30 as u64);
-                crate::print_uart("\n");
+                // crate::print_uart("[recv_park] tid=");
+                // crate::print_uart_hex(tid.0 as u64);
+                // crate::print_uart(" sp=");
+                // crate::print_uart_hex(sp_before as u64);
+                // crate::print_uart(" saved_x30=");
+                // crate::print_uart_hex(entry_x30 as u64);
+                // crate::print_uart("\n");
             }
-            crate::print_uart("[recv] parking tid=");
-            crate::print_uart_hex(tid.0 as u64);
-            crate::print_uart(" elr=");
-            crate::print_uart_hex(tf.elr as u64);
-            crate::print_uart(" tf=");
-            crate::print_uart_hex(tf as *const TrapFrame as u64);
-            crate::print_uart("\n");
+            // crate::print_uart("[recv] parking tid=");
+            // crate::print_uart_hex(tid.0 as u64);
+            // crate::print_uart(" elr=");
+            // crate::print_uart_hex(tf.elr as u64);
+            // crate::print_uart(" tf=");
+            // crate::print_uart_hex(tf as *const TrapFrame as u64);
+            // crate::print_uart("\n");
             unsafe { block_current(IpcState::BlockedOnReceive(channel_id)); }
             // Check saved_x30 IMMEDIATELY after resume, before any other ops
             {
@@ -431,12 +434,12 @@ fn sys_ipc_recv(tf: &mut TrapFrame) {
                     let old_sp = sp_after + 0x6F0;
                     sx30_after = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
                 }
-                crate::print_uart("[recv] RESUMED tid=");
-                crate::print_uart_hex(tid.0 as u64);
-                crate::print_uart(" sp=");
-                crate::print_uart_hex(sp_after as u64);
-                crate::print_uart(" saved_x30=");
-                crate::print_uart_hex(sx30_after as u64);
+                // crate::print_uart("[recv] RESUMED tid=");
+                // crate::print_uart_hex(tid.0 as u64);
+                // crate::print_uart(" sp=");
+                // crate::print_uart_hex(sp_after as u64);
+                // crate::print_uart(" saved_x30=");
+                // crate::print_uart_hex(sx30_after as u64);
                 // saved_x30 should be a kernel address in 0x4000_0000..0x4100_0000 range.
                 // If it looks like a user VA (below 64GB), dump the stack frame.
                 if sx30_after > 0 && sx30_after < 0x4000_0000 {
@@ -449,25 +452,25 @@ fn sys_ipc_recv(tf: &mut TrapFrame) {
                         let val = unsafe { core::ptr::read_volatile((base + i * 8) as *const usize) };
                         crate::print_uart_hex(val as u64);
                     }
+                    crate::print_uart("\n");
                 }
-                crate::print_uart("\n");
             }
-            crate::print_uart("[recv] pre-getbuf tid=");
-            crate::print_uart_hex(tid.0 as u64);
-            crate::print_uart(" cur=");
-            crate::print_uart_hex(crate::kernel::sche::current_thread().0 as u64);
-            crate::print_uart("\n");
+            // crate::print_uart("[recv] pre-getbuf tid=");
+            // crate::print_uart_hex(tid.0 as u64);
+            // crate::print_uart(" cur=");
+            // crate::print_uart_hex(crate::kernel::sche::current_thread().0 as u64);
+            // crate::print_uart("\n");
             let buf = match get_ipc_buffer(tid) {
                 Ok(b) => {
-                    crate::print_uart("[recv] gotbuf ok tid=");
-                    crate::print_uart_hex(tid.0 as u64);
-                    crate::print_uart("\n");
+                    // crate::print_uart("[recv] gotbuf ok tid=");
+                    // crate::print_uart_hex(tid.0 as u64);
+                    // crate::print_uart("\n");
                     b
                 }
                 Err(_) => {
-                    crate::print_uart("[recv] no buf tid=");
-                    crate::print_uart_hex(tid.0 as u64);
-                    crate::print_uart("\n");
+                    // crate::print_uart("[recv] no buf tid=");
+                    // crate::print_uart_hex(tid.0 as u64);
+                    // crate::print_uart("\n");
                     tf.general.x0 = 0; return;
                 }
             };
@@ -481,11 +484,11 @@ fn sys_ipc_recv(tf: &mut TrapFrame) {
                         let old_sp = sp_mid + 0x6F0;
                         sx30_mid = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
                     }
-                    crate::print_uart("[recv] got payload tid=");
-                    crate::print_uart_hex(tid.0 as u64);
-                    crate::print_uart(" saved_x30=");
-                    crate::print_uart_hex(sx30_mid as u64);
-                    crate::print_uart("\n");
+                    // crate::print_uart("[recv] got payload tid=");
+                    // crate::print_uart_hex(tid.0 as u64);
+                    // crate::print_uart(" saved_x30=");
+                    // crate::print_uart_hex(sx30_mid as u64);
+                    // crate::print_uart("\n");
                 }
                 let n = unpack_short(&payload, buf_ptr, buf_len);
                 tf.general.x0 = n;
@@ -509,22 +512,22 @@ fn sys_ipc_recv(tf: &mut TrapFrame) {
                     unsafe {
                         saved_x30 = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
                     }
-                    crate::print_uart("[recv_ret] tid=");
-                    crate::print_uart_hex(tid.0 as u64);
-                    crate::print_uart(" sp=");
-                    crate::print_uart_hex(current_sp as u64);
-                    crate::print_uart(" tf=");
-                    crate::print_uart_hex(tf as *const TrapFrame as u64);
-                    crate::print_uart(" saved_x30=");
-                    crate::print_uart_hex(saved_x30 as u64);
-                    crate::print_uart(" live_x30=");
-                    crate::print_uart_hex(actual_lr as u64);
-                    crate::print_uart("\n");
+                    // crate::print_uart("[recv_ret] tid=");
+                    // crate::print_uart_hex(tid.0 as u64);
+                    // crate::print_uart(" sp=");
+                    // crate::print_uart_hex(current_sp as u64);
+                    // crate::print_uart(" tf=");
+                    // crate::print_uart_hex(tf as *const TrapFrame as u64);
+                    // crate::print_uart(" saved_x30=");
+                    // crate::print_uart_hex(saved_x30 as u64);
+                    // crate::print_uart(" live_x30=");
+                    // crate::print_uart_hex(actual_lr as u64);
+                    // crate::print_uart("\n");
                 }
             } else {
-                crate::print_uart("[R:empty] tid=");
-                crate::print_uart_hex(tid.0 as u64);
-                crate::print_uart("\n");
+                // crate::print_uart("[R:empty] tid=");
+                // crate::print_uart_hex(tid.0 as u64);
+                // crate::print_uart("\n");
                 tf.general.x0 = 0;
             }
         }
@@ -563,7 +566,7 @@ fn sys_ipc_call(tf: &mut TrapFrame) {
     sys_ipc_recv(tf);
 
     // Minimal debug right after recv returns
-    crate::print_uart("[call_post_recv]\n");
+    // crate::print_uart("[call_post_recv]\n");
 
     // DEBUG: check if tf changed during recv
     let tf_ptr_after: usize = tf as *const TrapFrame as usize;
@@ -571,19 +574,19 @@ fn sys_ipc_call(tf: &mut TrapFrame) {
     unsafe { core::arch::asm!("mov {}, x19", out(reg) x19_after); }
     let tid = crate::kernel::sche::current_thread();
     if false && tid.0 & 0xFFFF <= 3 {
-        crate::print_uart("[ipc_call_debug] tid=");
-        crate::print_uart_hex(tid.0 as u64);
-        crate::print_uart(" tf_before=");
-        crate::print_uart_hex(tf_ptr_before as u64);
-        crate::print_uart(" tf_after=");
-        crate::print_uart_hex(tf_ptr_after as u64);
-        crate::print_uart(" x19_before=");
-        crate::print_uart_hex(x19_before as u64);
-        crate::print_uart(" x19_after=");
-        crate::print_uart_hex(x19_after as u64);
-        crate::print_uart(" elr=");
-        crate::print_uart_hex(tf.elr as u64);
-        crate::print_uart("\n");
+        // crate::print_uart("[ipc_call_debug] tid=");
+        // crate::print_uart_hex(tid.0 as u64);
+        // crate::print_uart(" tf_before=");
+        // crate::print_uart_hex(tf_ptr_before as u64);
+        // crate::print_uart(" tf_after=");
+        // crate::print_uart_hex(tf_ptr_after as u64);
+        // crate::print_uart(" x19_before=");
+        // crate::print_uart_hex(x19_before as u64);
+        // crate::print_uart(" x19_after=");
+        // crate::print_uart_hex(x19_after as u64);
+        // crate::print_uart(" elr=");
+        // crate::print_uart_hex(tf.elr as u64);
+        // crate::print_uart("\n");
     }
 
     // Restore original registers (caller may need them)
@@ -658,6 +661,7 @@ fn sys_create_thread(tf: &mut TrapFrame) {
             128,                // default priority
             stack_base,
             ctx_addr,           // kernel_stack_top = next_sp (points to TaskContext)
+            8 * PAGE_SIZE,      // kernel_stack_size
             0,                  // ttbr0 (shares kernel page table)
             0,                  // asid
         )
@@ -1016,22 +1020,12 @@ fn sys_clone(tf: &mut TrapFrame) {
     let ks_top = ks_base + elf_loader::KERNEL_STACK_SIZE;
 
     // DEBUG: check if VA 0x564000 maps to kernel stack range in child PT
+    // (disabled for production output)
+    /*
     {
         let va_check = 0x564000;
-        let saved_x30_addr = ks_top - 0x5D8; // saved_x30 offset on child ks: ks_top - 416 - 0x6E0 + 0x688
-        // actually saved_x30 is at ks_base-based offset, let me scan:
-        // For child: sp at recv_ret was ~ks_top - 0x660. saved_x30 at sp + 0x688 = ks_top - 0x660 + 0x688
-        // Let's just check the page containing saved_x30
+        let saved_x30_addr = ks_top - 0x5D8;
         let saved_x30_page = saved_x30_addr & !0xFFF;
-        crate::print_uart("[clone_debug] ks_base=");
-        crate::print_uart_hex(ks_base as u64);
-        crate::print_uart(" ks_top=");
-        crate::print_uart_hex(ks_top as u64);
-        crate::print_uart(" saved_x30_est=");
-        crate::print_uart_hex(saved_x30_addr as u64);
-        crate::print_uart("\n");
-
-        // Check VA 0x564000 -> PA
         match child_pt.translate_va_to_pa(VirtAddr::from(va_check)) {
             Some(pa) => {
                 crate::print_uart("[clone_debug] VA 0x564000 -> PA=");
@@ -1045,8 +1039,6 @@ fn sys_clone(tf: &mut TrapFrame) {
                 crate::print_uart("[clone_debug] VA 0x564000 -> unmapped\n");
             }
         }
-
-        // Check all 32KB ks pages against user mappings (scan user VA space near 0x564000)
         for &va in &[0x564000usize, 0x565000, 0x566000, 0x563000, 0x562000, 0x561000, 0x560000, 0x550000, 0x500000, 0x400000] {
             if let Some(pa) = child_pt.translate_va_to_pa(VirtAddr::from(va)) {
                 if pa >= ks_base && pa < ks_top {
@@ -1059,14 +1051,15 @@ fn sys_clone(tf: &mut TrapFrame) {
             }
         }
     }
+    */
 
     // Register PA watch on child's kernel stack to detect any alloc/free/map touching these pages
     watch_pa_range(ks_base, ks_top);
-    crate::print_uart("[clone] watching child ks PA [");
-    crate::print_uart_hex(ks_base as u64);
-    crate::print_uart(",");
-    crate::print_uart_hex(ks_top as u64);
-    crate::print_uart(")\n");
+    // crate::print_uart("[clone] watching child ks PA [");
+    // crate::print_uart_hex(ks_base as u64);
+    // crate::print_uart(",");
+    // crate::print_uart_hex(ks_top as u64);
+    // crate::print_uart(")\n");
 
     let ctx_addr = ks_top - 128;  // TaskContext
     let tf_addr  = ctx_addr - 288; // TrapFrame below TaskContext
@@ -1117,7 +1110,7 @@ fn sys_clone(tf: &mut TrapFrame) {
 
     // ── 8. Create kernel thread in the child's address space ────────────
     let child_tid = match unsafe {
-        sche::create_thread(128, ks_base, ctx_addr, child_ttbr0, child_asid.0)
+        sche::create_thread(128, ks_base, ctx_addr, elf_loader::KERNEL_STACK_SIZE, child_ttbr0, child_asid.0)
     } {
         Ok(id) => id,
         Err(_) => {
@@ -1189,20 +1182,20 @@ fn sys_exec(tf: &mut TrapFrame) {
     let stack_top    = tf.general.x2;
     let bootinfo_ptr = tf.general.x3;
 
-    crate::print_uart("[exec] sys_exec called ptr=");
-    crate::print_uart_hex(elf_ptr as u64);
-    crate::print_uart(" len=");
-    crate::print_uart_hex(elf_len as u64);
-    crate::print_uart("\n");
+    // crate::print_uart("[exec] sys_exec called ptr=");
+    // crate::print_uart_hex(elf_ptr as u64);
+    // crate::print_uart(" len=");
+    // crate::print_uart_hex(elf_len as u64);
+    // crate::print_uart("\n");
 
     // Validate
     if elf_len == 0 || elf_len > 1024 * 1024 * 16 {
-        crate::print_uart("[exec] FAIL: invalid elf_len\n");
+        // crate::print_uart("[exec] FAIL: invalid elf_len\n");
         tf.general.x0 = (-EINVAL) as usize;
         return;
     }
     if stack_top & 0xF != 0 || stack_top >= 0x0000_8000_0000_0000 {
-        crate::print_uart("[exec] FAIL: invalid stack_top\n");
+        // crate::print_uart("[exec] FAIL: invalid stack_top\n");
         tf.general.x0 = (-EINVAL) as usize;
         return;
     }
@@ -1227,7 +1220,7 @@ fn sys_exec(tf: &mut TrapFrame) {
     let mut pt = match bmm::create_kernel_mapped_page_table() {
         Ok(pt) => pt,
         Err(_) => {
-            crate::print_uart("[exec] FAIL: create_kernel_mapped_page_table\n");
+            // crate::print_uart("[exec] FAIL: create_kernel_mapped_page_table\n");
             tf.general.x0 = (-ENOMEM) as usize;
             return;
         }
@@ -1239,41 +1232,41 @@ fn sys_exec(tf: &mut TrapFrame) {
     let lib_start = *LIBLINUX_VA_START.lock();
     let lib_end   = *LIBLINUX_VA_END.lock();
     if lib_entry == 0 || lib_start >= lib_end {
-        crate::print_uart("[exec] FAIL: invalid liblinux range\n");
+        // crate::print_uart("[exec] FAIL: invalid liblinux range\n");
         tf.general.x0 = (-ENOMEM) as usize;
         return;
     }
 
-    crate::print_uart("[exec] liblinux range [");
-    crate::print_uart_hex(lib_start as u64);
-    crate::print_uart(",");
-    crate::print_uart_hex(lib_end as u64);
-    crate::print_uart(") entry=");
-    crate::print_uart_hex(lib_entry as u64);
-    crate::print_uart("\n");
+    // crate::print_uart("[exec] liblinux range [");
+    // crate::print_uart_hex(lib_start as u64);
+    // crate::print_uart(",");
+    // crate::print_uart_hex(lib_end as u64);
+    // crate::print_uart(") entry=");
+    // crate::print_uart_hex(lib_entry as u64);
+    // crate::print_uart("\n");
 
     let current_tid = crate::kernel::sche::current_thread();
     let old_asid_val = crate::kernel::sche::with_thread(current_tid, |t| t.asid).unwrap_or(0);
-    crate::print_uart("[exec] old_asid=");
-    crate::print_uart_hex(old_asid_val as u64);
-    crate::print_uart("\n");
+    // crate::print_uart("[exec] old_asid=");
+    // crate::print_uart_hex(old_asid_val as u64);
+    // crate::print_uart("\n");
 
     if old_asid_val != 0 {
         let old_asid = bmm::AddressSpaceId(old_asid_val);
         let _ = bmm::with_page_table_mut(old_asid, |old_pt| {
             bmm::clone_user_range(old_pt, &mut pt, lib_start, lib_end)
         });
-        crate::print_uart("[exec] liblinux cloned\n");
+        // crate::print_uart("[exec] liblinux cloned\n");
     }
 
     // Load the new Linux ELF into the page table
-    crate::print_uart("[exec] loading new ELF...\n");
+    // crate::print_uart("[exec] loading new ELF...\n");
     if let Err(_) = elf_loader::load_elf_bytes(&mut pt, &elf_buf) {
-        crate::print_uart("[exec] FAIL: load_elf_bytes\n");
+        // crate::print_uart("[exec] FAIL: load_elf_bytes\n");
         tf.general.x0 = (-EINVAL) as usize;
         return;
     }
-    crate::print_uart("[exec] ELF loaded OK\n");
+    // crate::print_uart("[exec] ELF loaded OK\n");
 
     // Map user stack
     elf_loader::map_user_stack(&mut pt);
@@ -1282,29 +1275,29 @@ fn sys_exec(tf: &mut TrapFrame) {
     let boot_pa = match pt.translate_va_to_pa(aarch64::base::mm::VirtAddr::from(BOOTINFO_VA)) {
         Some(pa) => pa,
         None => {
-            crate::print_uart("[exec] FAIL: BOOTINFO_VA not mapped\n");
+            // crate::print_uart("[exec] FAIL: BOOTINFO_VA not mapped\n");
             tf.general.x0 = (-ENOMEM) as usize;
             return;
         }
     };
     unsafe { core::ptr::write_volatile(boot_pa as *mut BootInfo, bootinfo); }
-    crate::print_uart("[exec] BootInfo written pa=");
-    crate::print_uart_hex(boot_pa as u64);
-    crate::print_uart("\n");
+    // crate::print_uart("[exec] BootInfo written pa=");
+    // crate::print_uart_hex(boot_pa as u64);
+    // crate::print_uart("\n");
 
     // Register new AS
     let (new_asid, new_ttbr0) = match bmm::register_page_table(pt) {
         Some((id, token)) => (id, token),
         None => {
-            crate::print_uart("[exec] FAIL: register_page_table\n");
+            // crate::print_uart("[exec] FAIL: register_page_table\n");
             tf.general.x0 = (-ENOMEM) as usize; return;
         }
     };
-    crate::print_uart("[exec] new AS registered asid=");
-    crate::print_uart_hex(new_asid.0 as u64);
-    crate::print_uart(" ttbr0=");
-    crate::print_uart_hex(new_ttbr0 as u64);
-    crate::print_uart("\n");
+    // crate::print_uart("[exec] new AS registered asid=");
+    // crate::print_uart_hex(new_asid.0 as u64);
+    // crate::print_uart(" ttbr0=");
+    // crate::print_uart_hex(new_ttbr0 as u64);
+    // crate::print_uart("\n");
 
     // Update current thread's AS
     let _ = crate::kernel::sche::with_thread_mut(current_tid, |t| {
@@ -1332,9 +1325,9 @@ fn sys_exec(tf: &mut TrapFrame) {
 
     // Switch to the new TTBR0 and flush TLB BEFORE freeing the old AS.
     // The old page table pages must not be walked after they are freed.
-    crate::print_uart("[exec] switching TTBR0, eret to liblinux _start=");
-    crate::print_uart_hex(lib_entry as u64);
-    crate::print_uart("\n");
+    // crate::print_uart("[exec] switching TTBR0, eret to liblinux _start=");
+    // crate::print_uart_hex(lib_entry as u64);
+    // crate::print_uart("\n");
 
     unsafe {
         core::arch::asm!(

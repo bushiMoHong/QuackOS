@@ -223,13 +223,13 @@ pub fn reflect_linux_syscall(tf: &mut TrapFrame) {
         if tid.0 & 0xFFFF <= 3 {
             let nr = tf.general.x8 as usize;
             let name = linux_syscall_name(nr);
-            uart_puts("[L:");
-            uart_puts(name);
-            uart_puts("] tid=");
-            uart_put_hex(tid.0 as u64);
-            uart_puts(" elr=");
-            uart_put_hex(tf.elr as u64);
-            uart_puts("\n");
+            // uart_puts("[L:");
+            // uart_puts(name);
+            // uart_puts("] tid=");
+            // uart_put_hex(tid.0 as u64);
+            // uart_puts(" elr=");
+            // uart_put_hex(tf.elr as u64);
+            // uart_puts("\n");
         }
     }
 

@@ -175,8 +175,8 @@ pub struct LoadedElf {
 ///
 /// Returns the entry point and suggested `brk`.
 pub fn load_elf_bytes(pt: &mut PageTable, elf_bytes: &[u8]) -> Result<LoadedElf, &'static str> {
-    use crate::print_uart;
-    use crate::print_uart_hex;
+    // use crate::print_uart;
+    // use crate::print_uart_hex;
 
     let elf = ElfFile::new(elf_bytes).map_err(|_| "Invalid ELF magic")?;
     let entry = elf.header.pt2.entry_point() as usize;
@@ -194,19 +194,15 @@ pub fn load_elf_bytes(pt: &mut PageTable, elf_bytes: &[u8]) -> Result<LoadedElf,
     let mut data_end: usize = 0;
     let mut tls_memsz: usize = 0;
 
-    print_uart("[load_elf] entry=");
-    print_uart_hex(entry as u64);
-    print_uart("\n");
-
     for ph in elf.program_iter() {
         let ph_type = ph.get_type().unwrap_or(Type::Null);
 
         // Track PT_TLS size for brk guard pages
         if ph_type == Type::Tls {
             tls_memsz = ph.mem_size() as usize;
-            print_uart("[load_elf] PT_TLS memsz=");
-            print_uart_hex(tls_memsz as u64);
-            print_uart("\n");
+            // print_uart("[load_elf] PT_TLS memsz=");
+            // print_uart_hex(tls_memsz as u64);
+            // print_uart("\n");
             continue;
         }
 
@@ -228,24 +224,24 @@ pub fn load_elf_bytes(pt: &mut PageTable, elf_bytes: &[u8]) -> Result<LoadedElf,
         let start_page = page_align_down(vaddr);
         let end_page   = page_align_up(seg_end);
 
-        print_uart("[load_elf] PT_LOAD va=");
-        print_uart_hex(vaddr as u64);
-        print_uart(" memsz=");
-        print_uart_hex(memsz as u64);
-        print_uart(" filesz=");
-        print_uart_hex(filesz as u64);
-        print_uart(" pages=[");
-        print_uart_hex(start_page as u64);
-        print_uart(",");
-        print_uart_hex(end_page as u64);
-        print_uart(") flags=");
-        let w = mapf.contains(MapFlags::WRITE);
-        let x = mapf.contains(MapFlags::EXEC);
-        if x && w { print_uart("RWX"); }
-        else if x  { print_uart("R-X"); }
-        else if w  { print_uart("RW-"); }
-        else       { print_uart("R--"); }
-        print_uart("\n");
+        // print_uart("[load_elf] PT_LOAD va=");
+        // print_uart_hex(vaddr as u64);
+        // print_uart(" memsz=");
+        // print_uart_hex(memsz as u64);
+        // print_uart(" filesz=");
+        // print_uart_hex(filesz as u64);
+        // print_uart(" pages=[");
+        // print_uart_hex(start_page as u64);
+        // print_uart(",");
+        // print_uart_hex(end_page as u64);
+        // print_uart(") flags=");
+        // let w = mapf.contains(MapFlags::WRITE);
+        // let x = mapf.contains(MapFlags::EXEC);
+        // if x && w { print_uart("RWX"); }
+        // else if x  { print_uart("R-X"); }
+        // else if w  { print_uart("RW-"); }
+        // else       { print_uart("R--"); }
+        // print_uart("\n");
 
         if nsegs < MAX_SEGMENTS {
             seg_starts[nsegs]  = start_page;
@@ -284,13 +280,13 @@ pub fn load_elf_bytes(pt: &mut PageTable, elf_bytes: &[u8]) -> Result<LoadedElf,
 
         // Fill gap between previous segment and this one
         if last_end > 0 && start_page > last_end {
-            print_uart("[load_elf] gap fill [");
-            print_uart_hex(last_end as u64);
-            print_uart(",");
-            print_uart_hex(start_page as u64);
-            print_uart(") ");
-            print_uart_hex(((start_page - last_end) >> 12) as u64);
-            print_uart(" pages\n");
+            // print_uart("[load_elf] gap fill [");
+            // print_uart_hex(last_end as u64);
+            // print_uart(",");
+            // print_uart_hex(start_page as u64);
+            // print_uart(") ");
+            // print_uart_hex(((start_page - last_end) >> 12) as u64);
+            // print_uart(" pages\n");
 
             for page_va in (last_end..start_page).step_by(PAGE_SIZE) {
                 let pa = alloc_page().ok_or("OOM filling segment gap")?;
@@ -334,15 +330,15 @@ pub fn load_elf_bytes(pt: &mut PageTable, elf_bytes: &[u8]) -> Result<LoadedElf,
 
     if brk >= last_end {
         let brk_start = page_align_down(brk);
-        print_uart("[load_elf] brk area [");
-        print_uart_hex(brk_start as u64);
-        print_uart(",");
-        print_uart_hex((brk_start + brk_pages * PAGE_SIZE) as u64);
-        print_uart(") tls_memsz=");
-        print_uart_hex(tls_memsz as u64);
-        print_uart(" pages=");
-        print_uart_hex(brk_pages as u64);
-        print_uart("\n");
+        // print_uart("[load_elf] brk area [");
+        // print_uart_hex(brk_start as u64);
+        // print_uart(",");
+        // print_uart_hex((brk_start + brk_pages * PAGE_SIZE) as u64);
+        // print_uart(") tls_memsz=");
+        // print_uart_hex(tls_memsz as u64);
+        // print_uart(" pages=");
+        // print_uart_hex(brk_pages as u64);
+        // print_uart("\n");
 
         for page_va in (brk_start..brk_start + brk_pages * PAGE_SIZE).step_by(PAGE_SIZE) {
             let pa = alloc_page().ok_or("OOM mapping brk area")?;
@@ -363,9 +359,9 @@ pub fn load_elf_bytes(pt: &mut PageTable, elf_bytes: &[u8]) -> Result<LoadedElf,
     let phent_size = elf.header.pt2.ph_entry_size();
     let phnum = elf.header.pt2.ph_count();
     let brk = page_align_up(data_end);
-    print_uart("[load_elf] brk=");
-    print_uart_hex(brk as u64);
-    print_uart("\n");
+    // print_uart("[load_elf] brk=");
+    // print_uart_hex(brk as u64);
+    // print_uart("\n");
     Ok(LoadedElf { entry, brk, phdr_addr, phent_size, phnum })
 }
 
@@ -423,6 +419,7 @@ pub fn spawn_user_thread(entry: usize, stack_top: usize) -> Result<sche::ThreadI
             128,        // default priority
             ks_base,
             ctx_addr,   // kernel_stack_top
+            KERNEL_STACK_SIZE,
             0,          // ttbr0 (shares kernel page table)
             0,          // asid
         )
@@ -485,7 +482,7 @@ pub fn spawn_user_thread_in_as(
     unsafe { write_volatile(tf_addr as *mut TrapFrame, trapframe); }
 
     let tid = unsafe {
-        sche::create_thread(128, ks_base, ctx_addr, ttbr0 as usize, asid)
+        sche::create_thread(128, ks_base, ctx_addr, KERNEL_STACK_SIZE, ttbr0 as usize, asid)
     }
     .map_err(|_| "Failed to create thread in AS")?;
 

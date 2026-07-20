@@ -93,6 +93,7 @@ impl TaskManager {
         priority: TaskPriority,
         kernel_stack_base: usize,
         kernel_stack_top: usize,
+        kernel_stack_size: usize,
         ttbr0: usize,
         asid: usize,
         _owner_pid: ProcessId,
@@ -103,6 +104,7 @@ impl TaskManager {
                 priority.0,
                 kernel_stack_base,
                 kernel_stack_top,
+                kernel_stack_size,
                 ttbr0,
                 asid,
             )
@@ -113,8 +115,8 @@ impl TaskManager {
 
     /// Destroy a task and free its slot in the thread table.
     ///
-    /// The task must be in `Free` or `Dying` state.  Its kernel stack is
-    /// **not** deallocated by this call — that is the caller's responsibility.
+    /// The task must be in `Free` or `Dying` state.  The kernel stack is
+    /// freed by `destroy_thread`.
     ///
     /// # Errors
     ///

@@ -350,6 +350,58 @@ impl PageTable {
     }
 }
 
+impl PageTable {
+    /// Walk the entire page table and free every EL0-accessible data page
+    /// (L3 4 KiB pages and L2 2 MiB blocks).  Must be called **before** the
+    /// intermediate page-table frames are freed.
+    fn free_user_data_pages(&self) {
+        const PA_MASK: usize = 0x0000_FFFF_FFFF_F000;
+        const EL0_BIT: usize = 1 << 6; // AP[1] — EL0 accessible
+
+        let l0_ppn = self.root_ppn;
+        // SAFETY: page-table pages are backed by real RAM and identity-mapped.
+        let l0_table = unsafe { &*((PhysAddr::from(l0_ppn).0) as *const [usize; 512]) };
+        for l0_idx in 0..512usize {
+            let l0_bits = l0_table[l0_idx];
+            if l0_bits & 0b11 != 0b11 { continue; }
+            let l1_ppn = PhysPageNum::from((l0_bits & PA_MASK) >> 12);
+            let l1_table = unsafe { &*((PhysAddr::from(l1_ppn).0) as *const [usize; 512]) };
+
+            for l1_idx in 0..512usize {
+                let l1_bits = l1_table[l1_idx];
+                if l1_bits & 1 == 0 { continue; }
+                // 1 GiB blocks are EL1-only; skip them.
+                if l1_bits & 0b10 == 0 { continue; }
+                let l2_ppn = PhysPageNum::from((l1_bits & PA_MASK) >> 12);
+                let l2_table = unsafe { &*((PhysAddr::from(l2_ppn).0) as *const [usize; 512]) };
+
+                for l2_idx in 0..512usize {
+                    let l2_bits = l2_table[l2_idx];
+                    if l2_bits & 1 == 0 { continue; }
+
+                    if l2_bits & 0b10 == 0 {
+                        // 2 MiB block — free if EL0-accessible.
+                        if l2_bits & EL0_BIT != 0 {
+                            free_page(l2_bits & PA_MASK);
+                        }
+                        continue;
+                    }
+
+                    let l3_ppn = PhysPageNum::from((l2_bits & PA_MASK) >> 12);
+                    let l3_table = unsafe { &*((PhysAddr::from(l3_ppn).0) as *const [usize; 512]) };
+
+                    for l3_idx in 0..512usize {
+                        let l3_bits = l3_table[l3_idx];
+                        if l3_bits & 1 == 0 { continue; }
+                        if l3_bits & EL0_BIT == 0 { continue; }
+                        free_page(l3_bits & PA_MASK);
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl Drop for PageTable {
     fn drop(&mut self) {
         // Borrowed view — nothing to free.  The real owner manages lifecycle.
@@ -357,10 +409,13 @@ impl Drop for PageTable {
             return;
         }
 
-        // 1. 释放根页表
+        // 1. 释放所有用户数据页（必须在释放中间页表之前）
+        self.free_user_data_pages();
+
+        // 2. 释放根页表
         free_page(PhysAddr::from(self.root_ppn).0);
 
-        // 2. 遍历 TrackerPage 链表，释放所有中间页表，最后释放 TrackerPage 本身
+        // 3. 遍历 TrackerPage 链表，释放所有中间页表，最后释放 TrackerPage 本身
         let mut current_opt = self.tracker_head;
         while let Some(tp_ppn) = current_opt {
             let tracker = unsafe {

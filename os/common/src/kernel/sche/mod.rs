@@ -53,7 +53,7 @@
 //! use common::kernel::sche;
 //!
 //! // Create the boot thread.
-//! let tid = sche::create_thread(128, stack_base, stack_top, ttbr0, asid)?;
+//! let tid = sche::create_thread(128, stack_base, stack_top, stack_size, ttbr0, asid)?;
 //! unsafe { sche::bootstrap_idle(tid); }
 //! ```
 
@@ -107,6 +107,7 @@ pub fn init() {
             128,                    // default priority
             boot_stack_base,        // kernel_stack_base = boot stack
             boot_stack_top_addr,    // kernel_stack_top  = top of boot stack
+            boot_stack_top_addr - boot_stack_base, // kernel_stack_size
             0,                      // ttbr0
             0,                      // asid
         )

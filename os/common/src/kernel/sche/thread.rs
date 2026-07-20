@@ -166,6 +166,8 @@ pub struct Thread {
     // ── execution context ──
     /// Base address of this thread's kernel stack.
     pub kernel_stack_base: usize,
+    /// Size of the kernel stack (top - base).  Used by `destroy_thread`.
+    pub kernel_stack_size: usize,
     /// Page-table root token (TTBR0_EL1 value).
     pub ttbr0: usize,
     /// Address-space identifier (for TLB tagging).
@@ -204,11 +206,14 @@ impl Thread {
     /// The caller must ensure `kernel_stack_base` and `kernel_stack_top`
     /// point to a valid, exclusively-owned kernel stack for this thread.
     /// `ttbr0` must be a valid page-table root token.
+    /// `kernel_stack_size` is the full allocated size of the kernel stack
+    /// (used by `destroy_thread` to free the range).
     pub unsafe fn new(
         id: ThreadId,
         priority: u8,
         kernel_stack_base: usize,
         kernel_stack_top: usize,
+        kernel_stack_size: usize,
         ttbr0: usize,
         asid: usize,
     ) -> Self {
@@ -219,6 +224,7 @@ impl Thread {
             base_priority: priority,
             donated_priority: 0,
             kernel_stack_base,
+            kernel_stack_size,
             ttbr0,
             asid,
             state: AtomicU8::new(ThreadState::Ready as u8),
@@ -392,6 +398,10 @@ static THREAD_TABLE: Mutex<ThreadTableInner> = Mutex::new(ThreadTableInner::new(
 ///
 /// Returns the new `ThreadId` on success.
 ///
+/// `kernel_stack_size` is the full allocated byte-length of the kernel stack
+/// (typically `8 * PAGE_SIZE`).  It is stored so `destroy_thread` can free the
+/// entire contiguous range.
+///
 /// # Safety
 ///
 /// `kernel_stack_base` / `kernel_stack_top` must reference a valid, exclusive
@@ -400,6 +410,7 @@ pub unsafe fn create_thread(
     priority: u8,
     kernel_stack_base: usize,
     kernel_stack_top: usize,
+    kernel_stack_size: usize,
     ttbr0: usize,
     asid: usize,
 ) -> Result<ThreadId, ScheError> {
@@ -409,7 +420,7 @@ pub unsafe fn create_thread(
         .alloc_slot()
         .ok_or(ScheError::ThreadTableFull)?;
 
-    let thread = Thread::new(tid, priority, kernel_stack_base, kernel_stack_top, ttbr0, asid);
+    let thread = Thread::new(tid, priority, kernel_stack_base, kernel_stack_top, kernel_stack_size, ttbr0, asid);
 
     table.insert(thread)?;
 
@@ -420,19 +431,31 @@ pub unsafe fn create_thread(
 /// Destroy a thread and free its slot.
 ///
 /// The thread must be in `Free` or `Dying` state.  Its kernel stack is
-/// **not** deallocated here — that is the caller's responsibility.
+/// freed here — callers no longer need to deallocate it separately.
 pub fn destroy_thread(id: ThreadId) -> Result<(), ScheError> {
     if id.is_null() {
         return Err(ScheError::NullThreadId);
     }
 
-    let mut table = THREAD_TABLE.lock();
+    let (ks_base, ks_end) = {
+        let mut table = THREAD_TABLE.lock();
 
-    // Verify the thread exists with matching generation.
-    let _thread = table.lookup(id).ok_or(ScheError::InvalidThread)?;
+        // Verify the thread exists with matching generation.
+        let thread = table.lookup(id).ok_or(ScheError::InvalidThread)?;
 
-    // Mark as Free first, then release the slot.
-    table.free_slot(id.index());
+        let base = thread.kernel_stack_base;
+        let end = base + thread.kernel_stack_size;
+
+        // Mark as Free first, then release the slot.
+        table.free_slot(id.index());
+
+        (base, end)
+    };
+
+    // Free the kernel stack pages.
+    if ks_base != 0 {
+        aarch64::base::mm::free_page_range(ks_base, ks_end);
+    }
 
     log::info!("sche: destroyed thread {:?}", id);
     Ok(())
