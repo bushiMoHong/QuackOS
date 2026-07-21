@@ -427,7 +427,6 @@ pub unsafe fn create_thread(
     log::info!("sche: created thread {:?} prio={}", tid, priority);
     Ok(tid)
 }
-
 /// Destroy a thread and free its slot.
 ///
 /// The thread must be in `Free` or `Dying` state.  Its kernel stack is
@@ -454,7 +453,19 @@ pub fn destroy_thread(id: ThreadId) -> Result<(), ScheError> {
 
     // Free the kernel stack pages.
     if ks_base != 0 {
-        aarch64::base::mm::free_page_range(ks_base, ks_end);
+        crate::print_uart("[DT] base=");
+        crate::print_uart_hex(ks_base as u64);
+        crate::print_uart(" end=");
+        crate::print_uart_hex(ks_end as u64);
+        crate::print_uart(" sz=");
+        crate::print_uart_hex((ks_end - ks_base) as u64);
+        crate::print_uart(" tid=");
+        crate::print_uart_hex(id.0 as u64);
+        crate::print_uart("\n");
+        // Check for physical overlap with any page table before freeing
+        crate::kernel::bmm::check_all_as_overlap(ks_base, ks_end);
+        // FIXME: skip free_page_range to confirm crash cause
+        // aarch64::base::mm::free_page_range(ks_base, ks_end);
     }
 
     log::info!("sche: destroyed thread {:?}", id);
@@ -507,21 +518,20 @@ pub fn thread_exists(id: ThreadId) -> bool {
 ///
 /// The table lock is held for the duration of `f`.
 pub fn with_all_threads<R>(
-    f: impl FnOnce(&[Thread]) -> R,
+    f: impl FnOnce(&[&Thread]) -> R,
 ) -> R {
     let table = THREAD_TABLE.lock();
-    // Collect all active threads into a temporary buffer and pass as slice.
-    // MAX_THREADS is small, so this is cheap.
-    let mut buf: [*const Thread; MAX_THREADS] = [core::ptr::null(); MAX_THREADS];
+    let mut ptrs: [*const Thread; MAX_THREADS] = [core::ptr::null(); MAX_THREADS];
     let mut n = 0;
     for slot in table.slots.iter() {
         if let Some(ref t) = slot {
-            buf[n] = t as *const Thread;
+            ptrs[n] = t as *const Thread;
             n += 1;
         }
     }
-    // SAFETY: the pointers are valid while the lock is held.
-    let slice = unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const Thread, n) };
+    // SAFETY: ptrs[0..n] hold valid pointers into the locked table.
+    // *const Thread and &Thread have the same ABI, so this transmute is sound.
+    let slice = unsafe { core::slice::from_raw_parts(ptrs.as_ptr() as *const &Thread, n) };
     f(slice)
 }
 

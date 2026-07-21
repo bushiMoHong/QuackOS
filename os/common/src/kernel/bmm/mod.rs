@@ -653,3 +653,101 @@ pub fn map_page_in_as(
     entry.page_table.map(vpn, ppn, pte_flags);
     Ok(())
 }
+
+/// Walk all registered address spaces and print any physical page that
+/// overlaps with `[range_start, range_end)`.  Used for debugging double-free
+/// or double-allocation bugs.
+pub fn check_all_as_overlap(range_start: usize, range_end: usize) {
+    const PA_MASK: usize = 0x0000_FFFF_FFFF_F000;
+    let as_table = AS_TABLE.lock();
+    for slot in as_table.slots.iter() {
+        let entry = match slot {
+            Some(ref e) => e,
+            None => continue,
+        };
+        let pt = &entry.page_table;
+
+        // Check L0 root
+        let l0_pa = aarch64::base::mm::PhysAddr::from(pt.root_ppn).0;
+        if l0_pa >= range_start && l0_pa + 4096 <= range_end {
+            crate::print_uart("[OVERLAP] L0 root asid=");
+            crate::print_uart_hex(entry.id.0 as u64);
+            crate::print_uart(" pa=");
+            crate::print_uart_hex(l0_pa as u64);
+            crate::print_uart("\n");
+        }
+
+        // Walk L0
+        for l0_idx in 0..512usize {
+            let l0_bits = unsafe {
+                let table = &*(l0_pa as *const [usize; 512]);
+                table[l0_idx]
+            };
+            if l0_bits & 0b11 != 0b11 { continue; }
+            let l1_pa = l0_bits & PA_MASK;
+            if l1_pa >= range_start && l1_pa + 4096 <= range_end {
+                crate::print_uart("[OVERLAP] L1 table asid=");
+                crate::print_uart_hex(entry.id.0 as u64);
+                crate::print_uart(" pa=");
+                crate::print_uart_hex(l1_pa as u64);
+                crate::print_uart("\n");
+            }
+
+            // Walk L1
+            for l1_idx in 0..512usize {
+                let l1_bits = unsafe {
+                    let table = &*(l1_pa as *const [usize; 512]);
+                    table[l1_idx]
+                };
+                if l1_bits & 1 == 0 { continue; }
+                if l1_bits & 0b10 == 0 { continue; } // skip blocks
+                let l2_pa = l1_bits & PA_MASK;
+                if l2_pa >= range_start && l2_pa + 4096 <= range_end {
+                    crate::print_uart("[OVERLAP] L2 table asid=");
+                    crate::print_uart_hex(entry.id.0 as u64);
+                    crate::print_uart(" pa=");
+                    crate::print_uart_hex(l2_pa as u64);
+                    crate::print_uart("\n");
+                }
+
+                // Walk L2
+                for l2_idx in 0..512usize {
+                    let l2_bits = unsafe {
+                        let table = &*(l2_pa as *const [usize; 512]);
+                        table[l2_idx]
+                    };
+                    if l2_bits & 1 == 0 { continue; }
+                    if l2_bits & 0b10 == 0 { continue; } // skip blocks
+                    let l3_pa = l2_bits & PA_MASK;
+                    if l3_pa >= range_start && l3_pa + 4096 <= range_end {
+                        crate::print_uart("[OVERLAP] L3 table asid=");
+                        crate::print_uart_hex(entry.id.0 as u64);
+                        crate::print_uart(" pa=");
+                        crate::print_uart_hex(l3_pa as u64);
+                        crate::print_uart("\n");
+                    }
+
+                    // Walk L3 — check data pages
+                    for l3_idx in 0..512usize {
+                        let l3_bits = unsafe {
+                            let table = &*(l3_pa as *const [usize; 512]);
+                            table[l3_idx]
+                        };
+                        if l3_bits & 0b11 != 0b11 { continue; }
+                        let data_pa = l3_bits & PA_MASK;
+                        if data_pa >= range_start && data_pa < range_end {
+                            let va = (l0_idx << 39) | (l1_idx << 30) | (l2_idx << 21) | (l3_idx << 12);
+                            crate::print_uart("[OVERLAP] DATA asid=");
+                            crate::print_uart_hex(entry.id.0 as u64);
+                            crate::print_uart(" va=");
+                            crate::print_uart_hex(va as u64);
+                            crate::print_uart(" pa=");
+                            crate::print_uart_hex(data_pa as u64);
+                            crate::print_uart("\n");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

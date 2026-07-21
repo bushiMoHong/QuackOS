@@ -713,9 +713,23 @@ fn sys_exit_thread(tf: &mut TrapFrame) {
     });
 
     // Mark as Dying — scheduler will skip re-enqueuing.
-    let _ = crate::kernel::sche::with_thread_mut(current_tid, |t| {
+    let parent_tid = crate::kernel::sche::with_thread(current_tid, |t| {
         t.set_atomic_state(crate::kernel::sche::ThreadState::Dying);
-    });
+        t.parent_tid
+    }).ok().flatten();
+
+    // If the parent is blocked in wait4, wake it so it can reap us.
+    if let Some(pid) = parent_tid {
+        let blocked = crate::kernel::sche::with_thread(pid, |t| {
+            t.ipc_state == crate::kernel::ipc::synchronization::IpcState::BlockedOnWait4
+        }).unwrap_or(false);
+        if blocked {
+            crate::print_uart("[EXW]"); // DBG: waking parent
+            crate::kernel::sche::wake(pid);
+        } else {
+            crate::print_uart("[EXN]"); // DBG: parent not blocked on wait4
+        }
+    }
 
     // Yield CPU — we never return from this call because the current
     // thread is Dying and won't be re-enqueued.
@@ -1053,8 +1067,9 @@ fn sys_clone(tf: &mut TrapFrame) {
     }
     */
 
+    // PA watch disabled — was triggering [WATCH#N] spam on every destroy_thread.
     // Register PA watch on child's kernel stack to detect any alloc/free/map touching these pages
-    watch_pa_range(ks_base, ks_top);
+    // watch_pa_range(ks_base, ks_top);
     // crate::print_uart("[clone] watching child ks PA [");
     // crate::print_uart_hex(ks_base as u64);
     // crate::print_uart(",");
@@ -1379,42 +1394,61 @@ fn sys_exec(tf: &mut TrapFrame) {
 fn sys_wait4(tf: &mut TrapFrame) {
     let current_tid = crate::kernel::sche::current_thread();
 
-    // Scan all threads: is there a Dying child? any child at all?
-    let (child, has_children) = crate::kernel::sche::with_all_threads(|threads| {
-        let mut dying = None;
-        let mut any = false;
-        for t in threads.iter() {
-            if t.parent_tid == Some(current_tid) {
-                any = true;
-                if t.atomic_state() == crate::kernel::sche::ThreadState::Dying {
-                    dying = Some((t.id, t.exit_code));
-                    break;
+    // Reap any dying child.  If children exist but none has exited yet,
+    // block until sys_exit_thread wakes us.
+    let result = loop {
+        let (child, has_children) = crate::kernel::sche::with_all_threads(|threads| {
+            let mut dying = None;
+            let mut any = false;
+            for t in threads.iter() {
+                if t.parent_tid == Some(current_tid) {
+                    any = true;
+                    if t.atomic_state() == crate::kernel::sche::ThreadState::Dying {
+                        dying = Some((t.id, t.exit_code));
+                        break;
+                    }
                 }
             }
-        }
-        (dying, any)
-    });
+            (dying, any)
+        });
 
-    match child {
+        if let Some(ct) = child {
+            break Some(ct);
+        }
+
+        if has_children {
+            // Block until a child transitions to Dying.
+            crate::print_uart("[W4B]"); // DBG
+            unsafe {
+                crate::kernel::ipc::synchronization::block_current(
+                    crate::kernel::ipc::synchronization::IpcState::BlockedOnWait4,
+                );
+            }
+            crate::print_uart("[W4W]"); // DBG: woke up
+            // When woken, re-scan for the dying child.
+        } else {
+            crate::print_uart("[W4E]"); // DBG: -ECHILD
+            break None;
+        }
+    };
+
+    match result {
         Some((child_tid, exit_code)) => {
             // Clean up: destroy the child thread + its AS
-            let child_asid = crate::kernel::sche::with_thread(child_tid, |t| t.asid).unwrap_or(0);
-            if child_asid != 0 {
-                crate::kernel::bmm::unregister_address_space(
-                    crate::kernel::bmm::AddressSpaceId(child_asid));
-            }
+            // Temporarily skip unregister_address_space to isolate PF crash
+            // let child_asid = crate::kernel::sche::with_thread(child_tid, |t| t.asid).unwrap_or(0);
+            // if child_asid != 0 {
+            //     crate::kernel::bmm::unregister_address_space(
+            //         crate::kernel::bmm::AddressSpaceId(child_asid));
+            // }
             let _ = crate::kernel::sche::destroy_thread(child_tid);
 
+            crate::print_uart("[W4R]"); // DBG: reaping child
             // Return pid in x0, status in x1
             // status = (exit_code & 0xFF) << 8  (WIFEXITED + WEXITSTATUS encoding)
             let status = ((exit_code & 0xFF) << 8) as usize;
             tf.general.x0 = child_tid.0 as usize;
             tf.general.x1 = status;
-        }
-        None if has_children => {
-            // Children exist but none has exited yet — caller retries.
-            const EAGAIN: isize = 11;
-            tf.general.x0 = (-EAGAIN as i64) as usize;
         }
         None => {
             const ECHILD: isize = 10;

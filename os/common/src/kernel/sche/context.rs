@@ -149,18 +149,19 @@ pub fn schedule() {
     let current_tcb = unsafe { thread::tcb_ptr(current_tid) } as usize;
     let nxt_base = thread::with_thread(next_tid, |t| t.kernel_stack_base).unwrap_or(0);
     let cur_base = thread::with_thread(current_tid, |t| t.kernel_stack_base).unwrap_or(0);
+    let nxt_ks_size = thread::with_thread(next_tid, |t| t.kernel_stack_size).unwrap_or(64 * 4096);
+    let cur_ks_size = thread::with_thread(current_tid, |t| t.kernel_stack_size).unwrap_or(64 * 4096);
 
     // Validate next_sp is within the next thread's kernel stack.
-    // Boot stack is 256 KB (64 pages); regular stacks are 32 KB (8 pages).
     // If corrupted, the next thread will resume with a foreign stack → disaster.
-    if nxt_base != 0 && (next_sp < nxt_base || next_sp >= nxt_base + 64 * 4096) {
+    if nxt_base != 0 && (next_sp < nxt_base || next_sp >= nxt_base + nxt_ks_size) {
         crate::print_uart("\n*** PANIC: corrupted kernel_stack_top for next thread! ***\n");
         crate::print_uart("[VALIDATE] next_sp=");
         crate::print_uart_hex(next_sp as u64);
         crate::print_uart(" nxt_base=");
         crate::print_uart_hex(nxt_base as u64);
         crate::print_uart(" nxt_end=");
-        crate::print_uart_hex((nxt_base + 64 * 4096) as u64);
+        crate::print_uart_hex((nxt_base + nxt_ks_size) as u64);
         crate::print_uart(" nxt_tid=");
         crate::print_uart_hex(next_tid.0 as u64);
         crate::print_uart(" cur_tid=");
@@ -182,14 +183,14 @@ pub fn schedule() {
     {
         let sp: usize;
         unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
-        if !current_tid.is_null() && cur_base != 0 && (sp < cur_base || sp >= cur_base + 64 * 4096) {
+        if !current_tid.is_null() && cur_base != 0 && (sp < cur_base || sp >= cur_base + cur_ks_size) {
             crate::print_uart("\n*** PANIC: sp outside current kernel stack! ***\n");
             crate::print_uart("[VALIDATE] sp=");
             crate::print_uart_hex(sp as u64);
             crate::print_uart(" cur_base=");
             crate::print_uart_hex(cur_base as u64);
             crate::print_uart(" cur_end=");
-            crate::print_uart_hex((cur_base + 64 * 4096) as u64);
+            crate::print_uart_hex((cur_base + cur_ks_size) as u64);
             crate::print_uart(" cur_tid=");
             crate::print_uart_hex(current_tid.0 as u64);
             crate::print_uart("\n");
@@ -253,7 +254,8 @@ pub fn schedule() {
         // Validate sp is within the resumed thread's kernel stack
         if !tid.is_null() {
             let base = thread::with_thread(tid, |t| t.kernel_stack_base).unwrap_or(0);
-            if base != 0 && (sp < base || sp >= base + 64 * 4096) {
+            let ks_size = thread::with_thread(tid, |t| t.kernel_stack_size).unwrap_or(64 * 4096);
+            if base != 0 && (sp < base || sp >= base + ks_size) {
                 crate::print_uart("\n*** PANIC: sp outside own kernel stack AFTER resume! ***\n");
                 crate::print_uart("[SW:back:ERR] tid=");
                 crate::print_uart_hex(tid.0 as u64);
@@ -262,7 +264,7 @@ pub fn schedule() {
                 crate::print_uart(" base=");
                 crate::print_uart_hex(base as u64);
                 crate::print_uart(" end=");
-                crate::print_uart_hex((base + 64 * 4096) as u64);
+                crate::print_uart_hex((base + ks_size) as u64);
                 crate::print_uart("\n");
             }
         }

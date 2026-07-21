@@ -141,7 +141,7 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_pt
     let page_size = 4096;
 
     // Open the file
-    unsafe { crate::native::console_write(b"[ex1]\0".as_ptr(), 5); }
+    unsafe { crate::native::console_write(b"\n[ex1]\0".as_ptr(), 6); }
     let fid = match crate::ipc::fs_open(path_str) {
         Ok(f) => f,
         Err(e) => {

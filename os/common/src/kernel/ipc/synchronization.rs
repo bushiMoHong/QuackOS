@@ -41,6 +41,8 @@ pub enum IpcState {
     BlockedOnNotify(NotificationId),
     /// IPC operation timed out.
     TimedOut,
+    /// Blocked in wait4, waiting for a child thread to exit.
+    BlockedOnWait4,
 }
 
 impl IpcState {
