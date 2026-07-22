@@ -500,7 +500,10 @@ impl PageTable {
                 return Some(unsafe { &mut *(entry as *mut PageTableEntry) });
             }
             // L0-L2 — walk or allocate
-            if !entry.is_valid() {
+            // Must be a table descriptor (bits[1:0]==0b11).  A block descriptor
+            // (bits[1:0]==0b01) at L1 or L2 stops the hardware walk — it is NOT
+            // a pointer to a next-level table.  Replace it with a proper table.
+            if !entry.is_valid() || !entry.is_table() {
                 // Allocate a new intermediate table
                 let pa = alloc_page()?;
                 // Zero the new table
@@ -541,8 +544,9 @@ impl PageTable {
                 return Some(unsafe { &mut *(entry as *mut PageTableEntry) });
             }
 
-            // Intermediate level — ensure table descriptor exists
-            if !entry.is_valid() {
+            // Intermediate level — ensure table descriptor exists.
+            // A block descriptor is NOT a table pointer — replace it.
+            if !entry.is_valid() || !entry.is_table() {
                 let pa = alloc_page()?;
                 let va = PhysAddr::from(pa).to_kernel_virt().0;
                 unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096); }
@@ -641,8 +645,9 @@ impl PageTable {
             let entry = &mut table[idx];
 
             if i == 2 {
-                // Arrived at L2 — next hop is the L3 table
-                if !entry.is_valid() {
+                // Arrived at L2 — next hop is the L3 table.
+                // A 2 MiB block at L2 stops the hardware walk; replace it.
+                if !entry.is_valid() || !entry.is_table() {
                     let pa = alloc_page()?;
                     let va = PhysAddr::from(pa).to_kernel_virt().0;
                     unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096); }
@@ -656,7 +661,8 @@ impl PageTable {
                 });
             }
 
-            if !entry.is_valid() {
+            // L0 / L1 level — ensure table descriptor (not block)
+            if !entry.is_valid() || !entry.is_table() {
                 let pa = alloc_page()?;
                 let va = PhysAddr::from(pa).to_kernel_virt().0;
                 unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096); }

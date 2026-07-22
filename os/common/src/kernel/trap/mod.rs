@@ -424,6 +424,47 @@ impl TrapHandler for CommonTrapHandler {
                         uart_puts(" SP=");     uart_put_hex(tf.sp as u64);
                         uart_puts(" TPIDR=");  uart_put_hex(tf.tpidr as u64);
                         uart_puts("\n");
+                        // Dump the page-table walk for the faulting VA
+                        {
+                            use aarch64::base::mm::page_table::PageTable;
+                            use aarch64::base::mm::VirtPageNum;
+                            let ttbr0 = crate::kernel::sche::with_thread(
+                                crate::kernel::sche::current_thread(), |t| t.ttbr0
+                            ).unwrap_or(0);
+                            if ttbr0 != 0 {
+                                let pt = PageTable::from_token(ttbr0);
+                                let vpn = VirtPageNum::from(fault_addr >> 12);
+                                let idxs = vpn.indexes();
+                                let mut ppn = pt.root_ppn;
+                                let level_names = ["L0", "L1", "L2", "L3"];
+                                for (i, &idx) in idxs.iter().enumerate() {
+                                    let table = unsafe { ppn.get_pte_array() };
+                                    let entry = table[idx];
+                                    let raw = entry.bits;
+                                    uart_puts("[PF PT] ");
+                                    uart_puts(level_names[i]);
+                                    uart_puts("[");
+                                    uart_put_hex(idx as u64);
+                                    uart_puts("]=");
+                                    uart_put_hex(raw as u64);
+                                    if !entry.is_valid() {
+                                        uart_puts(" INVALID\n");
+                                        break;
+                                    }
+                                    if entry.is_table() {
+                                        uart_puts(" TABLE\n");
+                                    } else if entry.is_block_or_page() {
+                                        let ap = (raw >> 6) & 0b11;
+                                        uart_puts(" LEAF ap=");
+                                        uart_put_hex(ap as u64);
+                                        uart_puts("\n");
+                                        break;
+                                    }
+                                    if i == 3 { break; }
+                                    ppn = entry.ppn();
+                                }
+                            }
+                        }
                         loop {
                             unsafe { core::arch::asm!("wfi"); }
                         }

@@ -346,9 +346,11 @@ pub enum MapError {
 ///
 /// The new table contains:
 /// - L0[0] → L1 table
-/// - L1[0] → L2_LO table
-/// - L1[1] = 1GB RAM block (identity maps PA 0x40000000-0x7FFFFFFF)
-/// - L2_LO device blocks for UART (0x09000000) and VirtIO (0x0A000000)
+/// - L1[0] → L2_LO table (VA 0x0–0x3FFF_FFFF: user pages + MMIO)
+/// - L1[1] → L2_MID table (VA 0x40000000–0x7FFF_FFFF)
+///   - L2_MID[*] = 512 × 2 MiB kernel-only identity blocks
+///   - Each block is replaced by an L3 table when user pages are mapped
+/// - L2_LO device blocks for GIC / UART / VirtIO
 ///
 /// User-space pages (L2_LO[0]-L2_LO[0x47]) start empty.
 /// All intermediate pages are tracked via `PageTable::track_frame` and
@@ -377,17 +379,37 @@ pub fn create_kernel_mapped_page_table() -> Result<PageTable, MapError> {
     let l1_table = unsafe { l1_ppn.get_pte_array_mut() };
     l1_table[0] = PageTableEntry::new_table(l2_lo_ppn);
 
-    // L1[1] = 1GB RAM block (identity map 0x40000000-0x7FFFFFFF)
-    l1_table[1] = PageTableEntry {
-        bits: (0x40000000usize)
-            | (2 << 2)     // AttrIndx 2 = normal WB
-            | (1 << 5)     // NS
-            | (0b11 << 8)  // inner shareable
-            | (0b00 << 6)  // AP = EL1 RW, EL0 RW
-            | (1 << 10)    // AF
-            | (1 << 54)    // UXN
-            | 0b01,        // block, valid
-    };
+    // L1[1] → L2_MID table (replaces the old 1 GiB block).
+    //
+    // A 1 GiB block at L1 stops the hardware page-table walk, making it
+    // impossible to create fine-grained L3 mappings for user programs
+    // loaded in this VA range (0x4000_0000–0x7FFF_FFFF).
+    //
+    // Instead we place a table descriptor here and populate every L2 slot
+    // with a 2 MiB kernel-only identity block.  When user pages are later
+    // mapped via find_pte_create, the per-page mapping logic will replace
+    // the affected 2 MiB block with an L3 table descriptor automatically.
+    let l2_mid_pa = alloc_page().ok_or(MapError::OutOfMemory)?;
+    let mut l2_mid_ppn = PhysPageNum::from(l2_mid_pa >> 12);
+    unsafe { core::ptr::write_bytes((l2_mid_pa) as *mut u8, 0, PAGE_SIZE); }
+    pt.track_frame(l2_mid_ppn);
+    l1_table[1] = PageTableEntry::new_table(l2_mid_ppn);
+
+    // Fill L2_MID with 512 × 2 MiB identity blocks (kernel-only, EL0 no access).
+    let l2_mid = unsafe { l2_mid_ppn.get_pte_array_mut() };
+    for i in 0..512usize {
+        let pa = 0x40000000usize + i * 0x200000; // 2 MiB stride
+        l2_mid[i] = PageTableEntry {
+            bits: (pa & 0x0000_FFFF_FFE0_0000) // output address [47:21]
+                | (2 << 2)     // AttrIndx 2 = normal WB
+                | (1 << 5)     // NS
+                | (0b11 << 8)  // inner shareable
+                | (0b00 << 6)  // AP = EL1 RW, EL0 no access
+                | (1 << 10)    // AF
+                | (1 << 54)    // UXN
+                | 0b01,        // block, valid
+        };
+    }
 
     // Copy device block entries from kernel L2_LO
     let kernel_l2_lo_pa = *crate::KERNEL_L2_LOW_PA.lock();
