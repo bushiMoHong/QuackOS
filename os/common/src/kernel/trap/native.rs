@@ -153,22 +153,25 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
     }
 
     // Debug: show final ELR after dispatch, before trap_return uses it
+    // (disabled — enable for debugging specific syscalls)
+    /*
     let tid = crate::kernel::sche::current_thread();
     if tid.0 & 0xFFFF == 2 || tid.0 & 0xFFFF == 0 {
         let sp: usize;
         unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
-        // crate::print_uart("[N:done] tid=");
-        // crate::print_uart_hex(tid.0 as u64);
-        // crate::print_uart(" nr=");
-        // crate::print_uart_hex(nr);
-        // crate::print_uart(" final_elr=");
-        // crate::print_uart_hex(tf.elr as u64);
-        // crate::print_uart(" tf=");
-        // crate::print_uart_hex(tf as *const TrapFrame as u64);
-        // crate::print_uart(" sp=");
-        // crate::print_uart_hex(sp as u64);
-        // crate::print_uart("\n");
+        crate::print_uart("[N:done] tid=");
+        crate::print_uart_hex(tid.0 as u64);
+        crate::print_uart(" nr=");
+        crate::print_uart_hex(nr);
+        crate::print_uart(" final_elr=");
+        crate::print_uart_hex(tf.elr as u64);
+        crate::print_uart(" tf=");
+        crate::print_uart_hex(tf as *const TrapFrame as u64);
+        crate::print_uart(" sp=");
+        crate::print_uart_hex(sp as u64);
+        crate::print_uart("\n");
     }
+    */
 }
 
 // ---------------------------------------------------------------------------
@@ -400,134 +403,16 @@ fn sys_ipc_recv(tf: &mut TrapFrame) {
             }
         }
         RecvMatch::Parked => {
-            // Read saved_x30 BEFORE blocking to check baseline
-            {
-                let sp_before: usize;
-                let entry_x30: usize;
-                unsafe {
-                    core::arch::asm!("mov {}, sp", out(reg) sp_before);
-                    let old_sp = sp_before + 0x6F0;
-                    entry_x30 = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
-                }
-                // crate::print_uart("[recv_park] tid=");
-                // crate::print_uart_hex(tid.0 as u64);
-                // crate::print_uart(" sp=");
-                // crate::print_uart_hex(sp_before as u64);
-                // crate::print_uart(" saved_x30=");
-                // crate::print_uart_hex(entry_x30 as u64);
-                // crate::print_uart("\n");
-            }
-            // crate::print_uart("[recv] parking tid=");
-            // crate::print_uart_hex(tid.0 as u64);
-            // crate::print_uart(" elr=");
-            // crate::print_uart_hex(tf.elr as u64);
-            // crate::print_uart(" tf=");
-            // crate::print_uart_hex(tf as *const TrapFrame as u64);
-            // crate::print_uart("\n");
             unsafe { block_current(IpcState::BlockedOnReceive(channel_id)); }
-            // Check saved_x30 IMMEDIATELY after resume, before any other ops
-            {
-                let sp_after: usize;
-                let sx30_after: usize;
-                unsafe {
-                    core::arch::asm!("mov {}, sp", out(reg) sp_after);
-                    let old_sp = sp_after + 0x6F0;
-                    sx30_after = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
-                }
-                // crate::print_uart("[recv] RESUMED tid=");
-                // crate::print_uart_hex(tid.0 as u64);
-                // crate::print_uart(" sp=");
-                // crate::print_uart_hex(sp_after as u64);
-                // crate::print_uart(" saved_x30=");
-                // crate::print_uart_hex(sx30_after as u64);
-                // saved_x30 should be a kernel address in 0x4000_0000..0x4100_0000 range.
-                // If it looks like a user VA (below 64GB), dump the stack frame.
-                if sx30_after > 0 && sx30_after < 0x4000_0000 {
-                    crate::print_uart(" *** CORRUPTED! stack dump:");
-                    let base = sp_after + 0x620; // dump from somewhat before x30
-                    for i in 0..32usize {
-                        crate::print_uart("\n  [");
-                        crate::print_uart_hex((base + i * 8) as u64);
-                        crate::print_uart("] = ");
-                        let val = unsafe { core::ptr::read_volatile((base + i * 8) as *const usize) };
-                        crate::print_uart_hex(val as u64);
-                    }
-                    crate::print_uart("\n");
-                }
-            }
-            // crate::print_uart("[recv] pre-getbuf tid=");
-            // crate::print_uart_hex(tid.0 as u64);
-            // crate::print_uart(" cur=");
-            // crate::print_uart_hex(crate::kernel::sche::current_thread().0 as u64);
-            // crate::print_uart("\n");
+
             let buf = match get_ipc_buffer(tid) {
-                Ok(b) => {
-                    // crate::print_uart("[recv] gotbuf ok tid=");
-                    // crate::print_uart_hex(tid.0 as u64);
-                    // crate::print_uart("\n");
-                    b
-                }
-                Err(_) => {
-                    // crate::print_uart("[recv] no buf tid=");
-                    // crate::print_uart_hex(tid.0 as u64);
-                    // crate::print_uart("\n");
-                    tf.general.x0 = 0; return;
-                }
+                Ok(b) => b,
+                Err(_) => { tf.general.x0 = 0; return; }
             };
             if let Some(payload) = buf.read_short() {
-                // Check saved_x30 BEFORE unpack_short
-                {
-                    let sp_mid: usize;
-                    let sx30_mid: usize;
-                    unsafe {
-                        core::arch::asm!("mov {}, sp", out(reg) sp_mid);
-                        let old_sp = sp_mid + 0x6F0;
-                        sx30_mid = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
-                    }
-                    // crate::print_uart("[recv] got payload tid=");
-                    // crate::print_uart_hex(tid.0 as u64);
-                    // crate::print_uart(" saved_x30=");
-                    // crate::print_uart_hex(sx30_mid as u64);
-                    // crate::print_uart("\n");
-                }
                 let n = unpack_short(&payload, buf_ptr, buf_len);
                 tf.general.x0 = n;
-                // Verify saved LR on stack frame
-                // sys_ipc_recv prologue: stp x29,x30,[sp,#-0x60]!; ...; sub sp,sp,#0x690
-                // Epilogue: add sp,sp,#0x690; ...; ldp x29,x30,[sp],#0x60; ret
-                // Saved x30 is at old_sp - 0x58 = (current_sp + 0x6F0) - 0x58
-                {
-                    let current_sp: usize;
-                    let saved_x30: usize;
-                    let actual_lr: usize;
-                    unsafe {
-                        core::arch::asm!(
-                            "mov {s}, sp",
-                            "mov {alr}, x30",
-                            s = out(reg) current_sp,
-                            alr = out(reg) actual_lr,
-                        );
-                    }
-                    let old_sp = current_sp + 0x6F0;
-                    unsafe {
-                        saved_x30 = core::ptr::read_volatile((old_sp - 0x58) as *const usize);
-                    }
-                    // crate::print_uart("[recv_ret] tid=");
-                    // crate::print_uart_hex(tid.0 as u64);
-                    // crate::print_uart(" sp=");
-                    // crate::print_uart_hex(current_sp as u64);
-                    // crate::print_uart(" tf=");
-                    // crate::print_uart_hex(tf as *const TrapFrame as u64);
-                    // crate::print_uart(" saved_x30=");
-                    // crate::print_uart_hex(saved_x30 as u64);
-                    // crate::print_uart(" live_x30=");
-                    // crate::print_uart_hex(actual_lr as u64);
-                    // crate::print_uart("\n");
-                }
             } else {
-                // crate::print_uart("[R:empty] tid=");
-                // crate::print_uart_hex(tid.0 as u64);
-                // crate::print_uart("\n");
                 tf.general.x0 = 0;
             }
         }
@@ -724,10 +609,7 @@ fn sys_exit_thread(tf: &mut TrapFrame) {
             t.ipc_state == crate::kernel::ipc::synchronization::IpcState::BlockedOnWait4
         }).unwrap_or(false);
         if blocked {
-            crate::print_uart("[EXW]"); // DBG: waking parent
             crate::kernel::sche::wake(pid);
-        } else {
-            crate::print_uart("[EXN]"); // DBG: parent not blocked on wait4
         }
     }
 
@@ -1418,16 +1300,13 @@ fn sys_wait4(tf: &mut TrapFrame) {
 
         if has_children {
             // Block until a child transitions to Dying.
-            crate::print_uart("[W4B]"); // DBG
             unsafe {
                 crate::kernel::ipc::synchronization::block_current(
                     crate::kernel::ipc::synchronization::IpcState::BlockedOnWait4,
                 );
             }
-            crate::print_uart("[W4W]"); // DBG: woke up
             // When woken, re-scan for the dying child.
         } else {
-            crate::print_uart("[W4E]"); // DBG: -ECHILD
             break None;
         }
     };
@@ -1435,15 +1314,12 @@ fn sys_wait4(tf: &mut TrapFrame) {
     match result {
         Some((child_tid, exit_code)) => {
             // Clean up: destroy the child thread + its AS
-            // Temporarily skip unregister_address_space to isolate PF crash
-            // let child_asid = crate::kernel::sche::with_thread(child_tid, |t| t.asid).unwrap_or(0);
-            // if child_asid != 0 {
-            //     crate::kernel::bmm::unregister_address_space(
-            //         crate::kernel::bmm::AddressSpaceId(child_asid));
-            // }
+            let child_asid = crate::kernel::sche::with_thread(child_tid, |t| t.asid).unwrap_or(0);
+            if child_asid != 0 {
+                crate::kernel::bmm::unregister_address_space(
+                    crate::kernel::bmm::AddressSpaceId(child_asid));
+            }
             let _ = crate::kernel::sche::destroy_thread(child_tid);
-
-            crate::print_uart("[W4R]"); // DBG: reaping child
             // Return pid in x0, status in x1
             // status = (exit_code & 0xFF) << 8  (WIFEXITED + WEXITSTATUS encoding)
             let status = ((exit_code & 0xFF) << 8) as usize;

@@ -410,9 +410,7 @@ impl Drop for PageTable {
         }
 
         // 1. 释放所有用户数据页（必须在释放中间页表之前）
-        // FIXME: free_user_data_pages causes memory corruption (PF after exec).
-        // Disabled until the root cause is found — user pages leak but are safe.
-        // self.free_user_data_pages();
+        self.free_user_data_pages();
 
         // 2. 释放根页表
         free_page(PhysAddr::from(self.root_ppn).0);

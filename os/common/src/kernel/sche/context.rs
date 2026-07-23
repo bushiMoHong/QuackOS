@@ -199,31 +199,8 @@ pub fn schedule() {
 
     // DBG: only print when child thread involved
     if current_tid.0 & 0xFFFF <= 3 || next_tid.0 & 0xFFFF <= 3 {
-        let cur_base = thread::with_thread(current_tid, |t| t.kernel_stack_base).unwrap_or(0);
-        let cur_top  = thread::with_thread(current_tid, |t| t.kernel_stack_top).unwrap_or(0);
-        let nxt_base = thread::with_thread(next_tid, |t| t.kernel_stack_base).unwrap_or(0);
-        let nxt_saved = thread::with_thread(next_tid, |t| t.kernel_stack_top).unwrap_or(0);
-        let sp: usize;
-        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
         // crate::print_uart("[SW] cur=");
-        // crate::print_uart_hex(current_tid.0 as u64);
-        // crate::print_uart(" sp=");
-        // crate::print_uart_hex(sp as u64);
-        // crate::print_uart(" ks=");
-        // crate::print_uart_hex(cur_base as u64);
-        // crate::print_uart("-");
-        // crate::print_uart_hex((cur_base + 64 * 4096) as u64);
-        // crate::print_uart(" tcb=");
-        // crate::print_uart_hex(current_tcb as u64);
-        // crate::print_uart(" nxt=");
-        // crate::print_uart_hex(next_tid.0 as u64);
-        // crate::print_uart(" nxt_sp=");
-        // crate::print_uart_hex(next_sp as u64);
-        // crate::print_uart(" nxt_ks=");
-        // crate::print_uart_hex(nxt_base as u64);
-        // crate::print_uart("-");
-        // crate::print_uart_hex((nxt_base + 64 * 4096) as u64);
-        // crate::print_uart("\n");
+        // ...
     }
 
     // 7. Context switch — **no locks held from this point**.

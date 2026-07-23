@@ -141,25 +141,19 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_pt
     let page_size = 4096;
 
     // Open the file
-    unsafe { crate::native::console_write(b"\n[ex1]\0".as_ptr(), 6); }
     let fid = match crate::ipc::fs_open(path_str) {
         Ok(f) => f,
-        Err(e) => {
-            unsafe { crate::native::console_write(b"[ex1e]\0".as_ptr(), 6); }
-            return (-e as u64);
-        }
+        Err(e) => return (-e as u64),
     };
-    unsafe { crate::native::console_write(b"[ex2]\0".as_ptr(), 5); }
 
     // Get file size
     let file_size = match crate::ipc::fs_fstat(fid) {
         Ok(sz) => sz as usize,
         Err(e) => {
-            unsafe { crate::native::console_write(b"[ex2e]\0".as_ptr(), 6); }
-            crate::ipc::fs_close(fid).ok(); return (-e as u64);
+            crate::ipc::fs_close(fid).ok();
+            return (-e as u64);
         }
     };
-    unsafe { crate::native::console_write(b"[ex3]\0".as_ptr(), 5); }
     if file_size == 0 || file_size > 16 * 1024 * 1024 {
         crate::ipc::fs_close(fid).ok();
         return (-crate::errno::ENOEXEC as u64);
@@ -179,12 +173,10 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_pt
                     c += page_size;
                 }
                 crate::ipc::fs_close(fid).ok();
-                unsafe { crate::native::console_write(b"[ex3e]\0".as_ptr(), 6); }
                 return (-crate::errno::ENOMEM as u64);
             }
         }
     }
-    unsafe { crate::native::console_write(b"[ex4]\0".as_ptr(), 5); }
 
     // Read the entire ELF — loop since IPC payload is limited
     let mut total = 0usize;
@@ -196,7 +188,6 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_pt
             Ok(0) => break,
             Ok(n) => total += n,
             Err(e) => {
-                unsafe { crate::native::console_write(b"[ex4e]\0".as_ptr(), 6); }
                 crate::ipc::fs_close(fid).ok();
                 for va in (buf_addr..buf_addr + total_size).step_by(page_size) {
                     unsafe { crate::native::unmap_page(va); }
@@ -206,7 +197,6 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_pt
         }
     }
     crate::ipc::fs_close(fid).ok();
-    unsafe { crate::native::console_write(b"[ex5]\0".as_ptr(), 5); }
 
     // Parse ELF header
     let elf_slice = unsafe { core::slice::from_raw_parts(buf_addr as *const u8, total) };
@@ -231,14 +221,12 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_pt
             (entry, brk, phdr, phent, phnum)
         }
         Err(_) => {
-            unsafe { crate::native::console_write(b"[ex6e]\0".as_ptr(), 6); }
             for va in (buf_addr..buf_addr + total_size).step_by(page_size) {
                 unsafe { crate::native::unmap_page(va); }
             }
             return (-crate::errno::ENOEXEC as u64);
         }
     };
-    unsafe { crate::native::console_write(b"[ex6]\0".as_ptr(), 5); }
 
     // Write BootInfo to the extra page after the ELF buffer
     #[repr(C)]
@@ -264,11 +252,9 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_pt
     }
 
     // Call native exec — on success this never returns
-    unsafe { crate::native::console_write(b"[ex7]\0".as_ptr(), 5); }
     let ret = unsafe { crate::native::exec(buf_addr, total, stack_top, bootinfo_addr) };
 
     // If exec returns, it failed — clean up
-    unsafe { crate::native::console_write(b"[ex7e]\0".as_ptr(), 6); }
     for va in (buf_addr..buf_addr + total_size).step_by(page_size) {
         unsafe { crate::native::unmap_page(va); }
     }

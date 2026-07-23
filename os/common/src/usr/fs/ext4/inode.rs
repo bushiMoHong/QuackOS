@@ -472,7 +472,13 @@ impl Ext4InodeDisk {
 
         if extent_header.depth > 0 {
             let extent_idxs = self.extent_idxs(&extent_header);
-            if let Some(idx) = extent_idxs.iter().find(|idx| idx.block <= current_block) {
+            // Find the LAST index whose block <= current_block.
+            // .find() returns the FIRST match — that's wrong when the
+            // tree has multiple indices covering different logical ranges.
+            if let Some(idx) = extent_idxs.iter()
+                .filter(|i| i.block <= current_block)
+                .max_by_key(|i| i.block)
+            {
                 let child_block_num = idx.physical_leaf_block();
                 let mut block_data = read_ext4_block(&block_device, child_block_num, ext4_block_size);
                 return Ext4ExtentBlock::new(&mut block_data)

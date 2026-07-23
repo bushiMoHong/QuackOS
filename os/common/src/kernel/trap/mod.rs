@@ -218,20 +218,21 @@ pub fn reflect_linux_syscall(tf: &mut TrapFrame) {
     }
 
     // Debug: track Linux syscalls made by user threads
+    // (disabled — uncomment to trace syscalls)
+    /*
     {
         let tid = sche::current_thread();
-        if tid.0 & 0xFFFF <= 3 {
-            let nr = tf.general.x8 as usize;
-            let name = linux_syscall_name(nr);
-            // uart_puts("[L:");
-            // uart_puts(name);
-            // uart_puts("] tid=");
-            // uart_put_hex(tid.0 as u64);
-            // uart_puts(" elr=");
-            // uart_put_hex(tf.elr as u64);
-            // uart_puts("\n");
-        }
+        let nr = tf.general.x8 as usize;
+        let name = linux_syscall_name(nr);
+        crate::print_uart("[L:");
+        crate::print_uart(name);
+        crate::print_uart("] tid=");
+        crate::print_uart_hex(tid.0 as u64);
+        crate::print_uart(" elr=");
+        crate::print_uart_hex(tf.elr as u64);
+        crate::print_uart("\n");
     }
+    */
 
     // Redirect execution to liblinux handler
     tf.elr = handler_pc;
@@ -307,6 +308,7 @@ fn linux_syscall_name(nr: usize) -> &'static str {
         59  => "pipe2",
         220 => "clone",
         221 => "execve",
+        260 => "wait4",
         278 => "getrandom",
         293 => "rseq",
         _   => "?",
@@ -411,6 +413,11 @@ impl TrapHandler for CommonTrapHandler {
                         uart_put_hex(tf.elr as u64);
                         uart_puts(" ESR=");
                         uart_put_hex(esr);
+                        uart_puts("\n");
+                        // Print which thread is current — critical for debugging
+                        let current_tid = crate::kernel::sche::current_thread();
+                        uart_puts("[PF] current_tid=");
+                        uart_put_hex(current_tid.0 as u64);
                         uart_puts("\n");
                         // Dump regs most likely to be address/base registers
                         uart_puts("[PF] x0="); uart_put_hex(tf.general.x0 as u64);

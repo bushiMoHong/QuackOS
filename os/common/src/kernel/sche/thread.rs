@@ -453,19 +453,9 @@ pub fn destroy_thread(id: ThreadId) -> Result<(), ScheError> {
 
     // Free the kernel stack pages.
     if ks_base != 0 {
-        crate::print_uart("[DT] base=");
-        crate::print_uart_hex(ks_base as u64);
-        crate::print_uart(" end=");
-        crate::print_uart_hex(ks_end as u64);
-        crate::print_uart(" sz=");
-        crate::print_uart_hex((ks_end - ks_base) as u64);
-        crate::print_uart(" tid=");
-        crate::print_uart_hex(id.0 as u64);
-        crate::print_uart("\n");
         // Check for physical overlap with any page table before freeing
         crate::kernel::bmm::check_all_as_overlap(ks_base, ks_end);
-        // FIXME: skip free_page_range to confirm crash cause
-        // aarch64::base::mm::free_page_range(ks_base, ks_end);
+        aarch64::base::mm::free_page_range(ks_base, ks_end);
     }
 
     log::info!("sche: destroyed thread {:?}", id);
