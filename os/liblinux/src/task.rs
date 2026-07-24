@@ -28,8 +28,13 @@ pub struct TaskStruct {
     pub brk: usize,
     /// Initial brk (set by kernel at load time, never shrinks below this)
     pub initial_brk: usize,
-    /// Process ID (from the kernel's perspective — ThreadId)
+    /// Process ID (liblinux-managed, Linux-style small integer starting from 1)
     pub pid: u64,
+    /// Next PID to allocate for child processes
+    pub next_pid: u64,
+    /// Map kernel ThreadId → liblinux PID (up to 16 children)
+    pub tid_to_pid: [(u32, u64); 16],
+    pub tid_to_pid_count: usize,
     /// Exit code (set by exit / exit_group)
     pub exit_code: i32,
     /// clear_child_tid pointer — kernel zeroes *clear_child_tid on thread exit.
@@ -58,6 +63,9 @@ impl TaskStruct {
             brk: initial_brk,
             initial_brk,
             pid: 1,
+            next_pid: 2,
+            tid_to_pid: [(0, 0); 16],
+            tid_to_pid_count: 0,
             exit_code: 0,
             clear_child_tid: 0,
             no_new_privs: false,
@@ -106,5 +114,30 @@ impl TaskStruct {
 
         self.brk = new_brk;
         Ok(new_brk)
+    }
+
+    /// Allocate a new PID for a child, and store the ThreadId→PID mapping.
+    pub fn alloc_child_pid(&mut self, tid: u32) -> u64 {
+        let pid = self.next_pid;
+        self.next_pid += 1;
+        if self.tid_to_pid_count < self.tid_to_pid.len() {
+            self.tid_to_pid[self.tid_to_pid_count] = (tid, pid);
+            self.tid_to_pid_count += 1;
+        }
+        pid
+    }
+
+    /// Look up the PID for a child ThreadId, and remove the mapping.
+    pub fn take_child_pid(&mut self, tid: u32) -> Option<u64> {
+        for i in 0..self.tid_to_pid_count {
+            if self.tid_to_pid[i].0 == tid {
+                let pid = self.tid_to_pid[i].1;
+                // Remove by swapping with last
+                self.tid_to_pid_count -= 1;
+                self.tid_to_pid[i] = self.tid_to_pid[self.tid_to_pid_count];
+                return Some(pid);
+            }
+        }
+        None
     }
 }

@@ -233,6 +233,7 @@ pub extern "C" fn rust_main() -> ! {
     let free_start = (bss_end + 0x1FFFFF) & !0x1FFFFF;
     let ram_end = 0x40000000 + 512 * 1024 * 1024 - 0x100000; // 512MB - 1MB for DTB/QEMU
     if free_start < ram_end {
+        aarch64::base::mm::init_page_tracking(free_start);
         aarch64::base::mm::free_page_range(free_start, ram_end);
         print_uart("Physical memory registered: ");
         print_uart_hex(free_start as u64);

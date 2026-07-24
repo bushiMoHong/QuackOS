@@ -108,12 +108,16 @@ pub fn sys_prctl(task: &mut TaskStruct, option: usize, arg2: usize, _arg3: usize
 ///
 /// Creates a child process that shares a copy of the parent's address space.
 /// The kernel handles page table cloning and thread creation.
-/// Returns: child tid in parent, 0 in child.
-pub fn sys_clone(_task: &mut TaskStruct, flags: usize, child_sp: usize,
+/// Returns: liblinux child PID in parent, 0 in child.
+pub fn sys_clone(task: &mut TaskStruct, flags: usize, child_sp: usize,
                  parent_tid: usize, child_tid: usize, tls: usize) -> u64 {
     let ret = unsafe { native::clone(flags, child_sp, parent_tid, child_tid, tls) };
-    // ret is already -errno on failure; Linux ABI returns it as-is.
-    ret as u64
+    if ret <= 0 {
+        return ret as u64; // 0 = child, negative = error
+    }
+    // Parent: map kernel ThreadId → liblinux PID
+    let tid = ret as u32;
+    task.alloc_child_pid(tid)
 }
 
 /// execve(path, argv, envp) — syscall 221
@@ -266,7 +270,7 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_pt
 /// Waits for a child process to exit.  The kernel returns -EAGAIN while
 /// children are alive but none has exited; we yield and retry to get
 /// blocking semantics, unless WNOHANG was requested.
-pub fn sys_wait4(_task: &TaskStruct, _pid: usize, wstatus: usize, options: usize, _rusage: usize) -> u64 {
+pub fn sys_wait4(task: &mut TaskStruct, _pid: usize, wstatus: usize, options: usize, _rusage: usize) -> u64 {
     const WNOHANG: usize = 1;
     const EAGAIN: isize = 11;
 
@@ -282,10 +286,13 @@ pub fn sys_wait4(_task: &TaskStruct, _pid: usize, wstatus: usize, options: usize
         if ret < 0 {
             return ret as u64; // -errno (e.g. -ECHILD), Linux ABI returns it as-is
         }
+        // Map kernel ThreadId → liblinux PID
+        let tid = ret as u32;
+        let pid = task.take_child_pid(tid).unwrap_or(ret as u64);
         // Write the exit status to user-space
         if wstatus != 0 {
             unsafe { core::ptr::write_volatile(wstatus as *mut i32, status as i32); }
         }
-        return ret as u64;
+        return pid;
     }
 }

@@ -134,13 +134,14 @@ pub fn run_init() -> ! {
         .expect("Failed to read /bin/bash");
     fs.close(0, fd).ok();
 
-    let bash = load_elf_bytes(&mut pt, &elf_data)
+    let user_elf = load_elf_bytes(&mut pt, &elf_data)
         .expect("Failed to load bash ELF");
     print_uart("bash entry: ");
-    print_uart_hex(bash.entry as u64);
+    print_uart_hex(user_elf.entry as u64);
     print_uart(" brk: ");
-    print_uart_hex(bash.brk as u64);
+    print_uart_hex(user_elf.brk as u64);
     print_uart("\n");
+
 
     // ------------------------------------------------------------------
     // 4. Map user stack
@@ -157,12 +158,12 @@ pub fn run_init() -> ! {
     use aarch64::base::mm::VirtAddr;
 
     let bootinfo = BootInfo {
-        program_entry: bash.entry as u64,
+        program_entry: user_elf.entry as u64,
         stack_top: USER_STACK_TOP as u64,
-        brk: bash.brk as u64,
-        phdr_addr: bash.phdr_addr as u64,
-        phent_size: bash.phent_size as u64,
-        phnum: bash.phnum as u64,
+        brk: user_elf.brk as u64,
+        phdr_addr: user_elf.phdr_addr as u64,
+        phent_size: user_elf.phent_size as u64,
+        phnum: user_elf.phnum as u64,
     };
 
     // Translate BOOTINFO_ADDR in the isolated PT to a physical address,

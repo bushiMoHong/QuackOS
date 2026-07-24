@@ -372,6 +372,68 @@ unsafe impl Send for FreeListPtr {}
 static FREE_LIST: Mutex<FreeListPtr> = Mutex::new(FreeListPtr(core::ptr::null_mut()));
 static FREE_COUNT: Mutex<usize> = Mutex::new(0);
 
+// ---------------------------------------------------------------------------
+// Page tracking bitmap (detects double-free / double-alloc)
+// ---------------------------------------------------------------------------
+
+/// Physical base address that index 0 of the bitmap corresponds to.
+static TRACK_BASE: Mutex<usize> = Mutex::new(0);
+/// Bitmap: each bit tracks one 4 KiB page. 1 = allocated, 0 = free.
+static TRACK_BITMAP: Mutex<[u64; 2048]> = Mutex::new([0u64; 2048]);
+
+/// Check if a physical page is currently marked as allocated.
+pub fn is_page_allocated(pa: usize) -> bool {
+    let base = *TRACK_BASE.lock();
+    if base == 0 || pa < base { return true; } // assume allocated if untracked
+    let idx = (pa - base) / PAGE_SIZE;
+    if idx >= 2048 * 64 { return true; }
+    let word = idx / 64;
+    let bit = idx % 64;
+    let bitmap = TRACK_BITMAP.lock();
+    (bitmap[word] >> bit) & 1 != 0
+}
+
+/// Initialise page tracking with the given physical memory base.
+/// All pages are pre-marked as "allocated" so that subsequent
+/// `free_page_range` (which marks them free) is valid.
+pub fn init_page_tracking(phys_base: usize) {
+    *TRACK_BASE.lock() = phys_base;
+    // Pre-mark all pages as allocated
+    let mut bitmap = TRACK_BITMAP.lock();
+    for word in bitmap.iter_mut() {
+        *word = u64::MAX;
+    }
+}
+
+fn track_mark(pa: usize, allocated: bool) {
+    let base = *TRACK_BASE.lock();
+    if base == 0 { return; }
+    if pa < base { return; }
+    let idx = (pa - base) / PAGE_SIZE;
+    if idx >= 2048 * 64 { return; }
+    let word = idx / 64;
+    let bit = idx % 64;
+    let mut bitmap = TRACK_BITMAP.lock();
+    let was_set = (bitmap[word] >> bit) & 1 != 0;
+    if allocated {
+        if was_set {
+            uart_puts("\n*** DOUBLE-ALLOC at PA=0x");
+            uart_puthex(pa as u64);
+            uart_puts(" ***\n");
+            loop { unsafe { core::arch::asm!("wfi"); } }
+        }
+        bitmap[word] |= 1u64 << bit;
+    } else {
+        if !was_set {
+            uart_puts("\n*** DOUBLE-FREE at PA=0x");
+            uart_puthex(pa as u64);
+            uart_puts(" ***\n");
+            loop { unsafe { core::arch::asm!("wfi"); } }
+        }
+        bitmap[word] &= !(1u64 << bit);
+    }
+}
+
 /// Allocate a single zeroed physical page.
 ///
 /// Returns `None` if the allocator is exhausted.
@@ -391,6 +453,7 @@ pub fn alloc_page() -> Option<usize> {
 
         let pa = head as usize;
         drop(list);
+        track_mark(pa, true); // mark allocated
         check_watch_pa(pa, "alloc_page");
         Some(pa)
     }
@@ -403,6 +466,7 @@ pub fn alloc_page() -> Option<usize> {
 /// The page must have been obtained from `alloc_page()` and not already freed.
 pub fn free_page(phys_addr: usize) {
     let addr = phys_addr & !(PAGE_SIZE - 1); // align down
+    track_mark(addr, false); // mark free BEFORE pushing to free list
     check_watch_pa(addr, "free_page");
     let mut list = FREE_LIST.lock();
     unsafe {

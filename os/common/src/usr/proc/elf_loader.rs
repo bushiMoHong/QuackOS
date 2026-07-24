@@ -81,11 +81,8 @@ fn elf_flags_to_mapf(ph_flags: xmas_elf::program::Flags) -> MapFlags {
     if ph_flags.is_read() {
         mf.0 |= MapFlags::READ;
     }
-    // Always allow writes — static PIE executables (like bash built with
-    // musl-gcc) often place .got / .data.rel.ro inside the single text
-    // segment.  The startup code must write to these pages during
-    // self-relocation.  On Linux the dynamic linker would mprotect these
-    // pages temporarily, but our kernel lacks a full dynamic linker.
+    // Allow writes to all segments — musl places static TLS (builtin_tls)
+    // and .got/.data.rel.ro inside the text segment for static PIE binaries.
     mf.0 |= MapFlags::WRITE;
     if ph_flags.is_execute() {
         mf.0 |= MapFlags::EXEC;
