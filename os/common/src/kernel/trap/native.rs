@@ -603,31 +603,8 @@ fn sys_exit_thread(tf: &mut TrapFrame) {
         t.parent_tid
     }).ok().flatten();
 
-    // Check bash's TPIDR and TLS-malloc context before waking parent
+    // Wake parent if it's blocked on wait4
     if let Some(pid) = parent_tid {
-        let parent_ttbr0 = crate::kernel::sche::with_thread(pid, |t| t.ttbr0).unwrap_or(0);
-        if parent_ttbr0 != 0 {
-            use aarch64::base::mm::page_table::PageTable;
-            use aarch64::base::mm::VirtAddr;
-            let pt = PageTable::from_token(parent_ttbr0);
-            // Dump TLS + 0xa0 (malloc context pointer) for bash
-            let tls_va = 0x420698usize; // bash's TPIDR_EL0
-            let ctx_va = tls_va + 0xa0; // = 0x420738
-            if let Some(pa) = pt.translate_va_to_pa(VirtAddr::from(ctx_va)) {
-                let val = unsafe { core::ptr::read_volatile(pa as *const u64) };
-                crate::print_uart("[EXIT.CTX] bash TLS+0xa0(0x420738)=");
-                crate::print_uart_hex(val);
-                let val2 = unsafe { core::ptr::read_volatile((pa as *const u64).add(1)) };
-                crate::print_uart(" next=");
-                crate::print_uart_hex(val2);
-                crate::print_uart("\n");
-                // If value is instruction bytes, it's wrong!
-                if val == 0xf9400401540003cd {
-                    crate::print_uart("[EXIT.CTX] *** BAD: TLS points to code! ***\n");
-                }
-            }
-        }
-
         let blocked = crate::kernel::sche::with_thread(pid, |t| {
             t.ipc_state == crate::kernel::ipc::synchronization::IpcState::BlockedOnWait4
         }).unwrap_or(false);
@@ -1326,23 +1303,6 @@ fn sys_wait4(tf: &mut TrapFrame) {
 
     match result {
         Some((child_tid, exit_code)) => {
-            // Collect bash heap PAs before freeing child
-            let parent_tid = crate::kernel::sche::current_thread();
-            let parent_ttbr0 = crate::kernel::sche::with_thread(parent_tid, |t| t.ttbr0).unwrap_or(0);
-            let mut heap_pas = [0usize; 16];
-            if parent_ttbr0 != 0 {
-                use aarch64::base::mm::page_table::PageTable;
-                use aarch64::base::mm::VirtAddr;
-                let pt = PageTable::from_token(parent_ttbr0);
-                let heap_vas = [0x500000usize, 0x510000, 0x550000, 0x560000, 0x565000, 0x579000];
-                for (i, &va) in heap_vas.iter().enumerate() {
-                    if i >= heap_pas.len() { break; }
-                    if let Some(pa) = pt.translate_va_to_pa(VirtAddr::from(va)) {
-                        heap_pas[i] = pa;
-                    }
-                }
-            }
-
             // Clean up: destroy the child thread + its AS
             let child_asid = crate::kernel::sche::with_thread(child_tid, |t| t.asid).unwrap_or(0);
             if child_asid != 0 {
@@ -1350,16 +1310,6 @@ fn sys_wait4(tf: &mut TrapFrame) {
                     crate::kernel::bmm::AddressSpaceId(child_asid));
             }
             let _ = crate::kernel::sche::destroy_thread(child_tid);
-
-            // Verify bash's heap pages are still allocated
-            for &pa in &heap_pas {
-                if pa != 0 && !aarch64::base::mm::is_page_allocated(pa) {
-                    crate::print_uart("\n*** BUG: bash heap PA=0x");
-                    crate::print_uart_hex(pa as u64);
-                    crate::print_uart(" freed by child reap! ***\n");
-                    loop { unsafe { core::arch::asm!("wfi"); } }
-                }
-            }
 
             // Return pid in x0, status in x1
             // status = (exit_code & 0xFF) << 8  (WIFEXITED + WEXITSTATUS encoding)

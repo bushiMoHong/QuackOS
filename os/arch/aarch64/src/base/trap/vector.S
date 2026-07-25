@@ -90,6 +90,8 @@ trap_return:
     cbnz    x2, 1f                 // skip if not EL0t
     ldr     x1, [sp, #24]          // tf.sp
     msr     sp_el0, x1
+    ldr     x2, [sp, #32]          // tf.tpidr (TPIDR_EL0 for user traps)
+    msr     tpidr_el0, x2
 1:
     // 从固定偏移量恢复所有通用寄存器（此时 x1 将被稳稳地恢复为 0x2222）
     ldp     x1,  x2,  [sp, #40]

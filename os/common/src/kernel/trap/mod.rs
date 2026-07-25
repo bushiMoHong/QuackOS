@@ -178,15 +178,6 @@ pub fn reflect_linux_syscall(tf: &mut TrapFrame) {
         None => loop { unsafe { core::arch::asm!("wfi"); } },
     };
 
-    // Verify save_area VA is in liblinux range (should be ~0x200000-0x21B000)
-    if save_area < 0x200000 || save_area > 0x220000 {
-        crate::print_uart("\n*** BAD SAVE_AREA tid=");
-        crate::print_uart_hex(tid.0 as u64);
-        crate::print_uart(" addr=0x");
-        crate::print_uart_hex(save_area as u64);
-        crate::print_uart(" ***\n");
-    }
-
     // Save Linux program context to per-thread save_area using scalar u64 writes.
     unsafe {
         let dst = save_area as *mut u64;
@@ -479,51 +470,6 @@ impl TrapHandler for CommonTrapHandler {
                                     if i == 3 { break; }
                                     ppn = entry.ppn();
                                 }
-                            }
-                        }
-                        // Search heap for corruption pattern 0xf9400401540003cd
-                        {
-                            use aarch64::base::mm::page_table::PageTable;
-                            use aarch64::base::mm::VirtAddr;
-                            let ttbr0 = crate::kernel::sche::with_thread(
-                                crate::kernel::sche::current_thread(), |t| t.ttbr0
-                            ).unwrap_or(0);
-                            if ttbr0 != 0 {
-                                let pt = PageTable::from_token(ttbr0);
-                                let pattern: u64 = 0xf9400401540003cd;
-                                // Search data/heap for corruption patterns, including above brk
-                                let mut va = 0x55A000usize;
-                                let mut found_code = false;
-                                let mut found_x8 = false;
-                                while va < 0x57A000 && (!found_code || !found_x8) {
-                                    if let Some(pa) = pt.translate_va_to_pa(VirtAddr::from(va)) {
-                                        let ptr = pa as *const u64;
-                                        for i in 0..512 {
-                                            let w = unsafe { core::ptr::read_volatile(ptr.add(i)) };
-                                            if !found_code && w == pattern {
-                                                uart_puts("[PF FIND] x0pat at VA=0x");
-                                                uart_put_hex((va + i * 8) as u64);
-                                                uart_puts("\n");
-                                                found_code = true;
-                                            }
-                                            if !found_x8 && w == 0x0101010101010101 {
-                                                uart_puts("[PF FIND] x8pat at VA=0x");
-                                                uart_put_hex((va + i * 8) as u64);
-                                                // dump 64 bytes context around this
-                                                uart_puts(" ctx=");
-                                                let base = unsafe { (pa as *const u64).add(if i >= 4 { i - 4 } else { 0 }) };
-                                                for j in 0..16 {
-                                                    uart_put_hex(unsafe { core::ptr::read_volatile(base.add(j)) });
-                                                }
-                                                uart_puts("\n");
-                                                found_x8 = true;
-                                            }
-                                        }
-                                    }
-                                    va += 4096;
-                                }
-                                if !found_code { uart_puts("[PF FIND] x0pat NOT in data/heap\n"); }
-                                if !found_x8 { uart_puts("[PF FIND] x8pat NOT in data/heap\n"); }
                             }
                         }
                         loop {

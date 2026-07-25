@@ -314,6 +314,57 @@ pub fn load_elf_bytes(pt: &mut PageTable, elf_bytes: &[u8]) -> Result<LoadedElf,
         last_end = end_page;
     }
 
+    // ── Phase 3.5: load PT_TLS initial image data ──────────────────────
+    // The PT_LOAD loop above may load code bytes at the PT_TLS vaddr when
+    // the linker places builtin_tls inside a PT_LOAD segment.  We must
+    // overwrite that range with the correct TLS initialisation image from
+    // the ELF file so musl's __init_tls can find the right template.
+    //
+    // We only copy `filesz` bytes (the initialised TLS data) and
+    // deliberately skip the BSS portion — zero_bss would clear bytes all
+    // the way to `memsz`, potentially overwriting adjacent code (e.g.
+    // mark_dead_jobs_as_notified in bash) that shares the same pages.
+    // The BSS TLS variables will be zeroed naturally when musl copies the
+    // template to brk (Phase 4 maps those pages zeroed).
+    for ph in elf.program_iter() {
+        if ph.get_type() != Ok(Type::Tls) {
+            continue;
+        }
+        let tls_vaddr  = ph.virtual_addr() as usize;
+        let tls_filesz = ph.file_size() as usize;
+        let tls_memsz_pht = ph.mem_size() as usize;
+        let tls_offset = ph.offset() as usize;
+
+        if tls_filesz == 0 || tls_memsz_pht == 0 {
+            continue;
+        }
+        if tls_vaddr + tls_filesz > data_end {
+            data_end = tls_vaddr + tls_filesz;
+        }
+        if tls_memsz_pht > tls_memsz {
+            tls_memsz = tls_memsz_pht;
+        }
+
+        // Only write the initialised portion, do NOT zero BSS here —
+        // that would clobber code sharing the same pages.
+        let copy_len = tls_filesz.min(elf_bytes.len().saturating_sub(tls_offset));
+        if copy_len == 0 {
+            continue;
+        }
+
+        let start_page = page_align_down(tls_vaddr);
+        let end_page   = page_align_up(tls_vaddr + copy_len);
+
+        for page_va in (start_page..end_page).step_by(PAGE_SIZE) {
+            let vpn = VirtPageNum::from(page_va >> 12);
+            let pa = match pt.find_pte(vpn) {
+                Some(pte) if pte.is_valid() => pte.ppn().0 << 12,
+                _ => continue, // page not mapped — shouldn't happen for static PIE
+            };
+            copy_segment_data(pa, page_va, tls_vaddr, copy_len, tls_offset, elf_bytes);
+        }
+    }
+
     // ── Phase 4: map pages at brk for musl's main-thread TLS area ──────
     // musl __init_tls copies the TLS initialisation image to the region
     // starting at brk.  The area must be large enough for:
