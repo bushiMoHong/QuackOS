@@ -1,4 +1,4 @@
-TARGET = echo
+TARGET = ls
 TARGET_JSON = aarch64-unknown-quackos.json
 TARGET_DIR = aarch64-unknown-quackos
 
