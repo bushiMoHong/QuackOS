@@ -801,7 +801,8 @@ fn sys_spawn(tf: &mut TrapFrame) {
         }
     };
 
-    // Map user stack
+    // Map BootInfo page + user stack
+    elf_loader::map_bootinfo_page(&mut pt);
     elf_loader::map_user_stack(&mut pt);
 
     // Register in global AS table
@@ -1072,7 +1073,7 @@ fn sys_exec(tf: &mut TrapFrame) {
     use crate::usr::proc::elf_loader;
     use alloc::vec;
 
-    const BOOTINFO_VA: usize = 0x208110; // must match elf_loader::BOOTINFO_VA
+    const BOOTINFO_VA: usize = 0x22b000; // must match elf_loader::BOOTINFO_VA
 
     let elf_ptr      = tf.general.x0;
     let elf_len      = tf.general.x1;
@@ -1107,10 +1108,11 @@ fn sys_exec(tf: &mut TrapFrame) {
         );
     }
 
-    // Copy BootInfo from user space
+    // Copy BootInfo from user space (extended with argc/argv)
     #[repr(C)]
     struct BootInfo { program_entry: u64, stack_top: u64, brk: u64,
-                      phdr_addr: u64, phent_size: u64, phnum: u64, }
+                      phdr_addr: u64, phent_size: u64, phnum: u64,
+                      argc: u64, argv_buf: [u8; 2048], }
     let bootinfo = unsafe { core::ptr::read_volatile(bootinfo_ptr as *const BootInfo) };
 
     // Create a new page table with kernel identity mappings
@@ -1158,7 +1160,8 @@ fn sys_exec(tf: &mut TrapFrame) {
     }
     // crate::print_uart("[exec] ELF loaded OK\n");
 
-    // Map user stack
+    // Map BootInfo page + user stack
+    elf_loader::map_bootinfo_page(&mut pt);
     elf_loader::map_user_stack(&mut pt);
 
     // Write BootInfo into the new AS at BOOTINFO_VA

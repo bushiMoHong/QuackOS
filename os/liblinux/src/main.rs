@@ -38,7 +38,7 @@ use task::TaskStruct;
 /// it lives in the same already-mapped page and the kernel's BootInfo write
 /// never overlaps with live liblinux data.
 /// Must match the kernel-side `elf_loader::BOOTINFO_VA`.
-const BOOTINFO_ADDR: usize = 0x208110;
+const BOOTINFO_ADDR: usize = 0x22b000;
 
 #[repr(C)]
 struct BootInfo {
@@ -48,6 +48,8 @@ struct BootInfo {
     phdr_addr:    u64,
     phent_size:   u64,
     phnum:        u64,
+    argc:         u64,
+    argv_buf:     [u8; 2048],
 }
 
 // ---------------------------------------------------------------------------
@@ -150,41 +152,79 @@ pub extern "C" fn _start() -> ! {
     const AT_RANDOM: u64 = 25;
     const AT_NULL: u64   = 0;
 
+    // argc/argv from the parent process (preserved across exec via BootInfo)
+    let argc = bootinfo.argc as usize;
+
     unsafe {
         let p = sp as *mut u64;
-        // Zero the auxv region — stack page may contain stale data
-        // from the physical page allocator (not guaranteed to be zeroed).
-        core::ptr::write_bytes(p, 0u8, 32 * 8); // 256 bytes
-        // argc
-        p.write_volatile(0);
-        // argv terminator
-        p.add(1).write_volatile(0);
-        // envp terminator
-        p.add(2).write_volatile(0);
-        // auxv entries
-        p.add(3).write_volatile(AT_PHDR);
-        p.add(4).write_volatile(bootinfo.phdr_addr);
-        p.add(5).write_volatile(AT_PHENT);
-        p.add(6).write_volatile(bootinfo.phent_size);
-        p.add(7).write_volatile(AT_PHNUM);
-        p.add(8).write_volatile(bootinfo.phnum);
-        p.add(9).write_volatile(AT_PAGESZ);
-        p.add(10).write_volatile(4096);
-        p.add(11).write_volatile(AT_ENTRY);
-        p.add(12).write_volatile(bootinfo.program_entry);
+        // Zero the first 512 bytes of the stack page (enough for argc +
+        // argv pointers + auxv; no code beyond this range writes here).
+        core::ptr::write_bytes(p, 0u8, 512);
+
+        // Write argv strings backwards from near the top of the page.
+        let mut wp = (p as usize) + 4096 - 8;
+        let mut argv_ptrs = [0usize; 128];
+        let mut arg_idx = 0usize;
+
+        // Decode null-separated strings from BootInfo.argv_buf
+        let mut buf_pos = 0usize;
+        while buf_pos < bootinfo.argv_buf.len() && arg_idx < 128 {
+            while buf_pos < bootinfo.argv_buf.len() && bootinfo.argv_buf[buf_pos] == 0 {
+                buf_pos += 1;
+            }
+            if buf_pos >= bootinfo.argv_buf.len() { break; }
+            let start = buf_pos;
+            while buf_pos < bootinfo.argv_buf.len() && bootinfo.argv_buf[buf_pos] != 0 {
+                buf_pos += 1;
+            }
+            let slen = buf_pos - start;
+            if slen == 0 { break; }
+
+            let alloc = ((slen + 1) + 7) & !7;
+            wp -= alloc;
+            let s_va = wp;
+            core::ptr::copy_nonoverlapping(
+                bootinfo.argv_buf[start..start + slen].as_ptr(),
+                s_va as *mut u8, slen);
+            core::ptr::write_volatile((s_va + slen) as *mut u8, 0u8);
+            argv_ptrs[arg_idx] = s_va;
+            arg_idx += 1;
+            buf_pos += 1;
+        }
+
+        // Stack layout (bottom-up from p):
+        //   [argc] [argv[0]..argv[N-1]] [NULL] [NULL (envp term)] [auxv...]
+        p.write_volatile(argc as u64);
+        let a = p.add(1);
+        for i in 0..arg_idx {
+            a.add(i).write_volatile(argv_ptrs[i] as u64);
+        }
+        a.add(arg_idx).write_volatile(0);     // argv terminator
+        a.add(arg_idx + 1).write_volatile(0); // envp terminator
+        let auxv = a.add(arg_idx + 2);
+        unsafe { auxv.add(0).write_volatile(AT_PHDR); }
+        unsafe { auxv.add(1).write_volatile(bootinfo.phdr_addr); }
+        unsafe { auxv.add(2).write_volatile(AT_PHENT); }
+        unsafe { auxv.add(3).write_volatile(bootinfo.phent_size); }
+        unsafe { auxv.add(4).write_volatile(AT_PHNUM); }
+        unsafe { auxv.add(5).write_volatile(bootinfo.phnum); }
+        unsafe { auxv.add(6).write_volatile(AT_PAGESZ); }
+        unsafe { auxv.add(7).write_volatile(4096); }
+        unsafe { auxv.add(8).write_volatile(AT_ENTRY); }
+        unsafe { auxv.add(9).write_volatile(bootinfo.program_entry); }
         // AT_HWCAP — CPU feature flags (0 = safe fallback)
-        p.add(13).write_volatile(AT_HWCAP);
-        p.add(14).write_volatile(0);
+        unsafe { auxv.add(10).write_volatile(AT_HWCAP); }
+        unsafe { auxv.add(11).write_volatile(0); }
         // AT_CLKTCK — clock ticks per second
-        p.add(15).write_volatile(AT_CLKTCK);
-        p.add(16).write_volatile(100);
+        unsafe { auxv.add(12).write_volatile(AT_CLKTCK); }
+        unsafe { auxv.add(13).write_volatile(100); }
         // AT_RANDOM — 16 random bytes for stack canary / arc4random
         // The data lives at sp+208, right after the auxv table.
-        p.add(17).write_volatile(AT_RANDOM);
-        p.add(18).write_volatile((sp + 208) as u64);
+        unsafe { auxv.add(14).write_volatile(AT_RANDOM); }
+        unsafe { auxv.add(15).write_volatile((sp + 208) as u64); }
         // AT_NULL terminator
-        p.add(19).write_volatile(AT_NULL);
-        p.add(20).write_volatile(0);
+        unsafe { auxv.add(16).write_volatile(AT_NULL); }
+        unsafe { auxv.add(17).write_volatile(0); }
 
         // 16 pseudo-random bytes at sp+208
         let random_bytes: [u8; 16] = [

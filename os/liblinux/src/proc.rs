@@ -125,7 +125,7 @@ pub fn sys_clone(task: &mut TaskStruct, flags: usize, child_sp: usize,
 /// Replaces the current process image with a new ELF loaded from `path`.
 /// Reads the ELF via IPC, then calls the kernel's sys_exec to perform the
 /// address-space replacement.
-pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_ptr: usize) -> u64 {
+pub fn sys_execve(task: &TaskStruct, path_ptr: usize, argv_ptr: usize, _envp_ptr: usize) -> u64 {
     let mut path = [0u8; 256];
     let len = unsafe {
         let mut l = 0;
@@ -241,9 +241,34 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_pt
         phdr_addr: u64,
         phent_size: u64,
         phnum: u64,
+        argc: u64,
+        argv_buf: [u8; 2048],
     }
     let stack_top = 0x7FFF_FFF1_0000usize;
     let bootinfo_addr = buf_addr + buf_size;
+
+    // Collect argv into the bootinfo buffer (null-separated strings)
+    let mut argc: u64 = 0;
+    let mut argv_buf = [0u8; 2048];
+    let mut buf_wp = 0usize;
+    if argv_ptr != 0 {
+        loop {
+            let arg_ptr = unsafe { core::ptr::read_volatile((argv_ptr as *const usize).add(argc as usize)) } as *const u8;
+            if arg_ptr.is_null() { break; }
+            // Copy this argument string into argv_buf
+            let mut pos = 0usize;
+            while pos < 256 && buf_wp < argv_buf.len() - 1 {
+                let b = unsafe { *arg_ptr.add(pos) };
+                argv_buf[buf_wp] = b;
+                buf_wp += 1;
+                pos += 1;
+                if b == 0 { break; }
+            }
+            argc += 1;
+            if argc >= 128 || buf_wp >= argv_buf.len() - 1 { break; }
+        }
+    }
+
     unsafe {
         core::ptr::write_volatile(bootinfo_addr as *mut BootInfo, BootInfo {
             program_entry: entry as u64,
@@ -252,6 +277,8 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, _argv_ptr: usize, _envp_pt
             phdr_addr: phdr_addr as u64,
             phent_size: phent as u64,
             phnum: phnum as u64,
+            argc,
+            argv_buf,
         });
     }
 

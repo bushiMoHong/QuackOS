@@ -43,9 +43,11 @@ pub const USER_STACK_BOTTOM: usize = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SI
 
 /// Fixed user-space address where the kernel writes BootInfo.
 /// Must match liblinux's `BOOTINFO_ADDR`.
-/// Placed right after liblinux's SAVE_AREA (34×u64 = 272 bytes) in the
-/// same ELF-mapped page — no extra mapping needed.
-pub const BOOTINFO_VA: usize = 0x208110;
+///
+/// Placed at a dedicated page well past the end of liblinux's .bss so that
+/// the entire BootInfo (including the argv buffer) lives on a clean page
+/// with no code to corrupt.
+pub const BOOTINFO_VA: usize = 0x22b000;
 
 // ---------------------------------------------------------------------------
 // Page-table helpers
@@ -414,6 +416,12 @@ pub fn load_elf_bytes(pt: &mut PageTable, elf_bytes: &[u8]) -> Result<LoadedElf,
     // print_uart_hex(brk as u64);
     // print_uart("\n");
     Ok(LoadedElf { entry, brk, phdr_addr, phent_size, phnum })
+}
+
+/// Map a dedicated zero-filled page for BootInfo at [`BOOTINFO_VA`].
+pub fn map_bootinfo_page(pt: &mut PageTable) {
+    let flags = MapFlags(MapFlags::READ | MapFlags::WRITE | MapFlags::USER);
+    map_user_pages_anon(pt, page_align_down(BOOTINFO_VA), 1, flags);
 }
 
 /// Map anonymous user stack pages at the default location.
