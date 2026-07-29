@@ -1,57 +1,81 @@
-# 目标镜像文件名
-IMG = image.img
-# 镜像大小（128MB）
+# QuackOS top-level Makefile
+#
+# Targets:
+#   make all       Build the kernel and liblinux (delegates to os/)
+#   make image     Create disk image and copy bin/ contents into it
+#   make run       Build and run in QEMU (delegates to os/)
+#   make clean     Remove image and build artifacts
+#
+# Typical workflow:
+#   ./update-bin.sh && make image && make run
+
+IMG     = image.img
 SIZE_MB = 128
-# Bash 编译输出目录（根据你的实际路径调整）
-BASH_DIR = bin
-HELLO_WORLD_DIR = bin
-# 要复制的可执行文件列表
-BASH_BINS = bash bashbug bashversion
-HELLO_WORLD_BIN = helloworld
+BIN_DIR = bin
 
-# 默认目标：生成并填充镜像
-all: $(IMG) populate
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
 
-# 创建并格式化镜像（空 ext4）
-$(IMG):
-	@echo "创建 $(SIZE_MB)MB 的空文件..."
-	dd if=/dev/zero of=$@ bs=1M count=$(SIZE_MB) status=progress
-	@echo "格式化为 ext4..."
-	mkfs.ext4 -F $@
-	@echo "镜像 $(IMG) 创建完成。"
+.PHONY: all
+all:
+	$(MAKE) -C os all
 
-# 填充镜像：挂载 -> 复制文件 -> 卸载
-populate: $(IMG)
-	@echo "挂载镜像到 mnt/ ..."
+# ---------------------------------------------------------------------------
+# Disk image
+# ---------------------------------------------------------------------------
+
+.PHONY: image
+image:
+	@echo "==> Creating $(SIZE_MB)MB disk image..."
+	dd if=/dev/zero of=$(IMG) bs=1M count=$(SIZE_MB) status=progress
+	mkfs.ext4 -F $(IMG)
+	@echo "==> Mounting image..."
 	@mkdir -p mnt
-	sudo mount -o loop $< mnt
-	@echo "创建 /bin 目录（如果不存在）..."
+	sudo mount -o loop $(IMG) mnt
 	sudo mkdir -p mnt/bin
-	@echo "复制 Bash 可执行文件到 /bin ..."
-	for f in $(BASH_BINS); do \
-	sudo cp -a $(BASH_DIR)/$$f mnt/bin/; \
-	done
-	@echo "复制 helloworld 到 /bin ..."
-	sudo cp $(HELLO_WORLD_DIR)/$(HELLO_WORLD_BIN) mnt/bin/
-	@echo "设置可执行权限（确认）..."
+	@echo "==> Copying $(BIN_DIR)/* → $(IMG):/bin/"
+	sudo cp -a $(BIN_DIR)/* mnt/bin/
 	sudo chmod 755 mnt/bin/*
-	@echo "卸载镜像..."
+	@echo "==> Unmounting..."
 	sudo umount mnt
 	@rmdir mnt
-	@echo "镜像填充完成。"
+	@echo "==> $(IMG) ready ($(SIZE_MB)MB, ext4)"
 
-# 手动挂载（用于调试或额外操作）
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+.PHONY: run
+run:
+	$(MAKE) -C os run
+
+# ---------------------------------------------------------------------------
+# Mount helpers (for manual inspection)
+# ---------------------------------------------------------------------------
+
+.PHONY: mount
 mount: $(IMG)
 	@mkdir -p mnt
-	sudo mount -o loop $< mnt
-	@echo "已挂载到 mnt/，操作完成后请执行 make umount"
+	sudo mount -o loop $(IMG) mnt
+	@echo "Mounted at mnt/.  Run 'make umount' when done."
 
+.PHONY: umount
 umount:
-	@if mountpoint -q mnt; then sudo umount mnt; rmdir mnt; fi
+	@if mountpoint -q mnt 2>/dev/null; then \
+		sudo umount mnt && rmdir mnt; \
+		echo "Unmounted."; \
+	else \
+		echo "Not mounted."; \
+	fi
 
-# 清理：卸载并删除镜像文件
-clean: umount
+# ---------------------------------------------------------------------------
+# Clean
+# ---------------------------------------------------------------------------
+
+.PHONY: clean
+clean:
+	@if mountpoint -q mnt 2>/dev/null; then sudo umount mnt; fi
 	@-rmdir mnt 2>/dev/null || true
 	rm -f $(IMG)
-
-.PHONY: all populate mount umount clean
+	$(MAKE) -C os clean

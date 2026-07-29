@@ -1,56 +1,8 @@
 #![no_std]
 #![no_main]
 
-use core::arch::asm;
 use core::ffi::CStr;
-
-// Native microkernel syscall numbers (SVC #1)
-const SYS_CONSOLE_WRITE: u64 = 11;
-const SYS_EXIT_THREAD:    u64 = 7;
-
-/// Write bytes directly to UART via native sys_console_write.
-unsafe fn console_write(buf: *const u8, len: usize) -> isize {
-    let ret: isize;
-    unsafe {
-        asm!(
-            "svc #1",
-            in("x8") SYS_CONSOLE_WRITE,
-            in("x0") buf,
-            in("x1") len,
-            lateout("x0") ret,
-        );
-    }
-    ret
-}
-
-/// Exit the current thread via native sys_exit_thread.
-unsafe fn exit_thread(code: i32) -> ! {
-    unsafe {
-        asm!(
-            "svc #1",
-            in("x8") SYS_EXIT_THREAD,
-            in("x0") code as u64,
-            options(noreturn),
-        );
-    }
-}
-
-// strlen stub — the compiler may call this when optimizing CStr::to_bytes()
-#[unsafe(no_mangle)]
-unsafe extern "C" fn strlen(s: *const u8) -> usize {
-    let mut len = 0;
-    unsafe {
-        while *s.add(len) != 0 {
-            len += 1;
-        }
-    }
-    len
-}
-
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    unsafe { exit_thread(1); }
-}
+use qlibc::{console, proc};
 
 core::arch::global_asm!(
     ".globl _start",
@@ -65,8 +17,13 @@ core::arch::global_asm!(
     echo_main = sym echo_main,
 );
 
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    proc::exit(1);
+}
+
 #[unsafe(no_mangle)]
-unsafe fn echo_main(argc: usize, argv: *const *const u8) -> ! {
+fn echo_main(argc: usize, argv: *const *const u8) -> ! {
     let mut newline = true;
     let mut start: usize = 1;
 
@@ -84,19 +41,18 @@ unsafe fn echo_main(argc: usize, argv: *const *const u8) -> ! {
     // Output arguments, space-separated
     for i in start..argc {
         if i > start {
-            unsafe { console_write(b" ".as_ptr(), 1) };
+            console::write(b" ");
         }
         let ptr = unsafe { *argv.add(i) };
         if !ptr.is_null() {
             let arg = unsafe { CStr::from_ptr(ptr) };
-            let bytes = arg.to_bytes();
-            unsafe { console_write(bytes.as_ptr(), bytes.len()) };
+            console::write(arg.to_bytes());
         }
     }
 
     if newline {
-        unsafe { console_write(b"\n".as_ptr(), 1) };
+        console::write(b"\n");
     }
 
-    unsafe { exit_thread(0); }
+    proc::exit(0);
 }

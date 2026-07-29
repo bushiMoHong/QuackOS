@@ -1,0 +1,13 @@
+[package]
+name = "qlibc"
+version = "0.1.0"
+edition = "2024"
+description = "QuackOS native libc replacement — safe wrappers around SVC #1 syscalls"
+
+[dependencies]
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
