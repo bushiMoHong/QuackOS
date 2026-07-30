@@ -34,6 +34,9 @@ const OP_LSEEK:    u8 = 5;
 const OP_WRITE:    u8 = 6;
 const OP_GETDENTS: u8 = 7;
 const OP_READLINK: u8 = 8;
+const OP_CREATE:   u8 = 9;
+const OP_UNLINK:   u8 = 10;
+const OP_RENAME:   u8 = 11;
 
 // ---------------------------------------------------------------------------
 // Kernel-internal IPC helpers
@@ -368,6 +371,38 @@ impl FsServer {
         }
     }
 
+    /// Rename (move) a file or directory.
+    pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), Errno> {
+        let (src_dentry, src_parent) = Self::path_walk(&self.root, old_path)?;
+        if src_dentry.is_negative() { return Err(Errno::ENOENT); }
+        let (dst_dentry, dst_parent) = Self::path_walk(&self.root, new_path)?;
+        let dst_pinode = dst_parent.inode.read().clone();
+        if let Some(ref pinode) = dst_pinode {
+            // Remove old name from source parent
+            let src_pinode = src_parent.inode.read().clone();
+            if let Some(ref pinode) = src_pinode {
+                pinode.unlink(src_dentry.clone())?;
+            }
+            // Create new name under destination parent
+            pinode.create(dst_dentry.clone(), 0o644);
+            Ok(())
+        } else {
+            Err(Errno::ENOENT)
+        }
+    }
+
+    /// Remove a file (unlink).
+    pub fn unlink(&self, path: &str) -> Result<(), Errno> {
+        let (dentry, parent_dentry) = Self::path_walk(&self.root, path)?;
+        if dentry.is_negative() { return Err(Errno::ENOENT); }
+        let pinode = parent_dentry.inode.read().clone();
+        if let Some(ref inode) = pinode {
+            inode.unlink(dentry).map(|_| ())
+        } else {
+            Err(Errno::ENOENT)
+        }
+    }
+
     // -----------------------------------------------------------------------
     // IPC event loop
     // -----------------------------------------------------------------------
@@ -512,6 +547,44 @@ impl FsServer {
                     Err(e) => {
                         resp[0..8].copy_from_slice(&(-(e as i64)).to_le_bytes());
                     }
+                }
+            }
+            OP_CREATE => {
+                // req: [op:u8][mode:u16 LE][path:...]
+                let mode = u16::from_le_bytes([req.get(1).copied().unwrap_or(0),
+                                               req.get(2).copied().unwrap_or(0)]);
+                let path_bytes = &req[3..];
+                let path_len = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+                let path = core::str::from_utf8(&path_bytes[..path_len]).unwrap_or("");
+                match self.create(0, path, mode) {
+                    Ok(()) => { /* default zero-filled resp = success */ }
+                    Err(e) => { resp[0..8].copy_from_slice(&(-(e as i64)).to_le_bytes()); }
+                }
+            }
+            OP_UNLINK => {
+                // req: [op:u8][path:...]
+                let path_bytes = &req[1..];
+                let path_len = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+                let path = core::str::from_utf8(&path_bytes[..path_len]).unwrap_or("");
+                match self.unlink(path) {
+                    Ok(()) => { /* success */ }
+                    Err(e) => { resp[0..8].copy_from_slice(&(-(e as i64)).to_le_bytes()); }
+                }
+            }
+            OP_RENAME => {
+                // req: [op:u8][old_len:u8][old_path][new_path]
+                let old_len = *req.get(1).unwrap_or(&0) as usize;
+                let path_bytes = &req[2..];
+                let old_path = core::str::from_utf8(
+                    &path_bytes[..old_len.min(path_bytes.len())]).unwrap_or("");
+                let new_start = 2 + old_len;
+                let new_path = core::str::from_utf8(
+                    &path_bytes[old_len..]).unwrap_or("");
+                // trim nulls
+                let new_path = new_path.trim_end_matches('\0');
+                match self.rename(old_path, new_path) {
+                    Ok(()) => { /* success */ }
+                    Err(e) => { resp[0..8].copy_from_slice(&(-(e as i64)).to_le_bytes()); }
                 }
             }
             _ => {

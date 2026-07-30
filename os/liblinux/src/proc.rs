@@ -243,6 +243,7 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, argv_ptr: usize, _envp_ptr
         phnum: u64,
         argc: u64,
         argv_buf: [u8; 2048],
+        cwd: [u8; 256],
     }
     let stack_top = 0x7FFF_FFF1_0000usize;
     let bootinfo_addr = buf_addr + buf_size;
@@ -279,6 +280,7 @@ pub fn sys_execve(task: &TaskStruct, path_ptr: usize, argv_ptr: usize, _envp_ptr
             phnum: phnum as u64,
             argc,
             argv_buf,
+            cwd: task.cwd,
         });
     }
 

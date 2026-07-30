@@ -1,2 +1,1 @@
-[target.aarch64-unknown-quackos]
-linker = "aarch64-linux-gnu-gcc"
+# rust-lld is used via linker-flavor = "ld.lld" in the target JSON

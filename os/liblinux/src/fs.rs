@@ -9,6 +9,10 @@ use crate::fd_table::FdKind;
 use crate::ipc;
 use crate::task::TaskStruct;
 
+/// Fixed user-space address where the kernel writes BootInfo (must match
+/// elf_loader::BOOTINFO_VA and liblinux's main.rs).
+const BOOTINFO_ADDR: usize = 0x22b000;
+
 // Linux open flags (partial)
 pub const O_RDONLY: u32 = 0x0000;
 pub const O_WRONLY: u32 = 0x0001;
@@ -415,8 +419,41 @@ pub fn sys_chdir(task: &mut TaskStruct, path_ptr: usize) -> u64 {
         }
         l
     };
+    if len == 0 { return 0; }
+
+    // Resolve relative paths against current CWD
+    let mut abs = [0u8; 256];
+    let abs_len: usize;
+    if path[0] != b'/' {
+        let cwd_end = task.cwd.iter().position(|&b| b == 0).unwrap_or(256);
+        let cwd_len = cwd_end.min(254);
+        abs[..cwd_len].copy_from_slice(&task.cwd[..cwd_len]);
+        let mut wp = cwd_len;
+        if wp > 0 && abs[wp - 1] != b'/' {
+            abs[wp] = b'/'; wp += 1;
+        }
+        let copy = len.min(255 - wp);
+        abs[wp..wp + copy].copy_from_slice(&path[..copy]);
+        wp += copy;
+        abs_len = wp;
+    } else {
+        let copy = len.min(255);
+        abs[..copy].copy_from_slice(&path[..copy]);
+        abs_len = copy;
+    }
     task.cwd = [0u8; 256];
-    task.cwd[..len.min(255)].copy_from_slice(&path[..len.min(255)]);
+    task.cwd[..abs_len].copy_from_slice(&abs[..abs_len]);
+
+    let bootinfo_cwd = (BOOTINFO_ADDR + 2104) as *mut u8;
+    unsafe {
+        let mut i = 0usize;
+        while i < abs_len {
+            core::ptr::write_volatile(bootinfo_cwd.add(i), abs[i]);
+            i += 1;
+        }
+        core::ptr::write_volatile(bootinfo_cwd.add(abs_len), 0u8);
+    }
+
     0
 }
 

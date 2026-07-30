@@ -1112,7 +1112,8 @@ fn sys_exec(tf: &mut TrapFrame) {
     #[repr(C)]
     struct BootInfo { program_entry: u64, stack_top: u64, brk: u64,
                       phdr_addr: u64, phent_size: u64, phnum: u64,
-                      argc: u64, argv_buf: [u8; 2048], }
+                      argc: u64, argv_buf: [u8; 2048],
+                      cwd: [u8; 256], }
     let bootinfo = unsafe { core::ptr::read_volatile(bootinfo_ptr as *const BootInfo) };
 
     // Create a new page table with kernel identity mappings
@@ -1168,15 +1169,11 @@ fn sys_exec(tf: &mut TrapFrame) {
     let boot_pa = match pt.translate_va_to_pa(aarch64::base::mm::VirtAddr::from(BOOTINFO_VA)) {
         Some(pa) => pa,
         None => {
-            // crate::print_uart("[exec] FAIL: BOOTINFO_VA not mapped\n");
             tf.general.x0 = (-ENOMEM) as usize;
             return;
         }
     };
     unsafe { core::ptr::write_volatile(boot_pa as *mut BootInfo, bootinfo); }
-    // crate::print_uart("[exec] BootInfo written pa=");
-    // crate::print_uart_hex(boot_pa as u64);
-    // crate::print_uart("\n");
 
     // Register new AS
     let (new_asid, new_ttbr0) = match bmm::register_page_table(pt) {
@@ -1256,7 +1253,7 @@ fn sys_exec(tf: &mut TrapFrame) {
         bmm::unregister_address_space(bmm::AddressSpaceId(old_asid_val));
     }
 
-    // Return 0 — but the caller (trap_return) will eret to liblinux _start,
+    // Return 0— but the caller (trap_return) will eret to liblinux _start,
     // not back to the old binary.  This is the execve semantic.
     tf.general.x0 = 0;
 }

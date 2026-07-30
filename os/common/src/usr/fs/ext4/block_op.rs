@@ -81,12 +81,18 @@ impl<'a> Ext4DirContentRO<'a> {
                 &self.content[file_offset..file_offset + rec_len as usize],
             )
             .expect("DirEntry::try_from failed");
-            file_offset += rec_len as usize;
             if dentry.inode_num == 0 {
+                file_offset += rec_len as usize;
                 continue;
             }
             let null_term_name_len = dentry.name.len() + 1;
             let d_reclen: usize = (NAME_OFFSET + null_term_name_len + 7) & !0x7;
+            if buf_offset + d_reclen as usize > buf_len {
+                // Buffer full – do NOT advance file_offset so the next
+                // getdents call will retry this same entry.
+                break;
+            }
+            file_offset += rec_len as usize;
             let dirent = LinuxDirent64 {
                 d_ino: dentry.inode_num as u64,
                 d_off: file_offset as u64,
@@ -94,9 +100,6 @@ impl<'a> Ext4DirContentRO<'a> {
                 d_type: dentry.file_type,
                 d_name: dentry.name.clone(),
             };
-            if buf_offset + d_reclen as usize > buf_len {
-                break;
-            }
             dirent.write_to_mem(&mut buf[buf_offset..buf_offset + d_reclen]);
             buf_offset += d_reclen as usize;
         }

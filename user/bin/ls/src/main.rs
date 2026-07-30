@@ -37,6 +37,8 @@ fn arg_or(argc: usize, argv: *const *const u8, idx: usize, default: &str) -> &st
 
 #[unsafe(no_mangle)]
 fn ls_main(argc: usize, argv: *const *const u8) -> ! {
+    // Ensure CWD is initialised before first use
+    qlibc::fs::init_cwd();
     let path = arg_or(argc, argv, 1, ".");
 
     // Open directory
@@ -50,20 +52,28 @@ fn ls_main(argc: usize, argv: *const *const u8) -> ! {
         }
     };
 
-    // Read directory entries
-    let mut buf = [0u8; 256];
-    if let Err(_) = fs::getdents(fid, &mut buf) {
-        fs::close(fid).ok();
-        console::write(b"ls: read error\n");
-        proc::exit(1);
-    }
-
-    // Parse and print entries (skip . and ..)
-    for entry in dirent::parse_dirents(&buf) {
-        let name = entry.name_bytes();
-        if name != b"." && name != b".." {
-            console::write(name);
-            console::write(b"  ");
+    // Read directory entries in a loop — the FsServer may return
+    // entries in chunks because the IPC buffer is limited to 256 bytes.
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = match fs::getdents(fid, &mut buf) {
+            Ok(n) => n,
+            Err(_) => {
+                fs::close(fid).ok();
+                console::write(b"ls: read error\n");
+                proc::exit(1);
+            }
+        };
+        if n == 0 {
+            break; // no more entries
+        }
+        // Only parse the valid portion of the buffer.
+        for entry in dirent::parse_dirents(&buf[..n]) {
+            let name = entry.name_bytes();
+            if name != b"." && name != b".." {
+                console::write(name);
+                console::write(b"  ");
+            }
         }
     }
     console::write(b"\n");

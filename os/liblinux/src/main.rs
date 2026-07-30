@@ -50,6 +50,7 @@ struct BootInfo {
     phnum:        u64,
     argc:         u64,
     argv_buf:     [u8; 2048],
+    cwd:          [u8; 256],
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +128,28 @@ pub extern "C" fn _start() -> ! {
 
     // 3. Initialise per-process state.
     unsafe { TASK = Some(TaskStruct::new(bootinfo.brk as usize)); }
+    // Restore CWD from BootInfo (preserved across exec)
+    if let Some(ref mut task) = unsafe { TASK.as_mut() } {
+        let cwd_len = bootinfo.cwd.iter().position(|&b| b == 0).unwrap_or(0);
+        if cwd_len > 0 {
+            task.cwd = [0u8; 256];
+            task.cwd[..cwd_len.min(255)].copy_from_slice(&bootinfo.cwd[..cwd_len.min(255)]);
+        }
+        // Write CWD back to BootInfo page so native (qlibc) programs
+        // can read it from the user-space VA.  The kernel may have
+        // written via a different VA/cache mapping, so we re-write
+        // here to ensure the data is visible through this VA.
+        let cwd_end = task.cwd.iter().position(|&b| b == 0).unwrap_or(0);
+        if cwd_end > 0 {
+            let dst = (BOOTINFO_ADDR + 2104) as *mut u8;
+            unsafe {
+                for i in 0..cwd_end {
+                    core::ptr::write_volatile(dst.add(i), task.cwd[i]);
+                }
+                core::ptr::write_volatile(dst.add(cwd_end), 0u8);
+            }
+        }
+    }
 
     // 4. Set up the Linux program's initial stack, then jump to it.
     //
