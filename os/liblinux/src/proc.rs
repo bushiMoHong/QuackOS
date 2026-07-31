@@ -30,23 +30,23 @@ pub fn sys_getpid(task: &TaskStruct) -> u64 {
 }
 
 /// getuid() — syscall 174
-pub fn sys_getuid(_task: &TaskStruct) -> u64 {
-    0 // root
+pub fn sys_getuid(task: &TaskStruct) -> u64 {
+    task.uid as u64
 }
 
 /// geteuid() — syscall 175
-pub fn sys_geteuid(_task: &TaskStruct) -> u64 {
-    0 // root
+pub fn sys_geteuid(task: &TaskStruct) -> u64 {
+    task.euid as u64
 }
 
 /// getgid() — syscall 176
-pub fn sys_getgid(_task: &TaskStruct) -> u64 {
-    0 // root
+pub fn sys_getgid(task: &TaskStruct) -> u64 {
+    task.gid as u64
 }
 
 /// getegid() — syscall 177
-pub fn sys_getegid(_task: &TaskStruct) -> u64 {
-    0 // root
+pub fn sys_getegid(task: &TaskStruct) -> u64 {
+    task.egid as u64
 }
 
 /// gettid() — syscall 178

@@ -28,9 +28,16 @@ pub fn sys_getrandom(_buf: usize, _len: usize, _flags: usize) -> u64 {
 }
 
 /// getcwd — syscall 17
+///
+/// Linux convention: returns the length of the path including the
+/// null terminator on success, or -errno on failure.  glibc uses the
+/// returned length to realloc the buffer when called with a NULL buf.
 pub fn sys_getcwd(task: &crate::task::TaskStruct, buf: usize, size: usize) -> u64 {
     if size == 0 { return (-crate::errno::EINVAL as u64); }
     let cwd_len = task.cwd.iter().position(|&b| b == 0).unwrap_or(0);
+    if cwd_len + 1 > size {
+        return (-crate::errno::ERANGE as u64);
+    }
     let copy = cwd_len.min(size - 1);
     if buf != 0 {
         unsafe {
@@ -38,7 +45,8 @@ pub fn sys_getcwd(task: &crate::task::TaskStruct, buf: usize, size: usize) -> u6
             *((buf as *mut u8).add(copy)) = 0;
         }
     }
-    buf as u64
+    // Return path length including null terminator (Linux ABI)
+    (cwd_len + 1) as u64
 }
 
 /// getpgid(pid) — syscall 154

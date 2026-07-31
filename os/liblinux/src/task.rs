@@ -42,6 +42,11 @@ pub struct TaskStruct {
     pub clear_child_tid: usize,
     /// PR_SET_NO_NEW_PRIVS flag
     pub no_new_privs: bool,
+    /// User / group credentials (initialised to regular user).
+    pub uid: u32,
+    pub euid: u32,
+    pub gid: u32,
+    pub egid: u32,
     /// Next free virtual address for mmap (simple bump allocator).
     pub mmap_base: usize,
     /// Console termios state (kernel struct termios, 36 bytes).
@@ -69,6 +74,10 @@ impl TaskStruct {
             exit_code: 0,
             clear_child_tid: 0,
             no_new_privs: false,
+            uid: 1000,
+            euid: 1000,
+            gid: 1000,
+            egid: 1000,
             mmap_base: 0x0001_0000_0000, // 4 GB, well above program segments
             termios: crate::fs::DEFAULT_TERMIOS,
             line_buf: [0; 4096],

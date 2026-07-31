@@ -151,7 +151,26 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // 4. Set up the Linux program's initial stack, then jump to it.
+    // 4. Build PWD environment variable from the restored CWD.
+    //    bash uses PWD directly for \W prompt expansion, so it must
+    //    match the actual current working directory.
+    let mut pwd_buf = [0u8; 264];
+    let pwd_len;
+    {
+        let task = unsafe { TASK.as_ref().unwrap() };
+        let cwd_end = task.cwd.iter().position(|&b| b == 0).unwrap_or(0);
+        pwd_buf[0] = b'P'; pwd_buf[1] = b'W'; pwd_buf[2] = b'D'; pwd_buf[3] = b'=';
+        if cwd_end > 0 {
+            let copy = cwd_end.min(256);
+            pwd_buf[4..4 + copy].copy_from_slice(&task.cwd[..copy]);
+            pwd_len = 4 + copy;
+        } else {
+            pwd_buf[4] = b'/';
+            pwd_len = 5;
+        }
+    }
+
+    // 5. Set up the Linux program's initial stack, then jump to it.
     //
     // AArch64 Linux process entry convention:
     //   sp → argc (8 bytes)
@@ -215,16 +234,42 @@ pub extern "C" fn _start() -> ! {
             buf_pos += 1;
         }
 
+        // Write env strings backwards from near the top of the page.
+        // Use $PWD variable expansion instead of \W escape.
+        // bash's promptvars option (on by default) expands $PWD
+        // via expand_prompt_string() after decode_prompt_string().
+        let ps1_str = b"PS1=$PWD \\$ ";
+        let home_str = b"HOME=/";
+        let ps1_alloc = ((ps1_str.len() + 1) + 7) & !7;
+        let home_alloc = ((home_str.len() + 1) + 7) & !7;
+        wp -= home_alloc;
+        let home_va = wp;
+        core::ptr::copy_nonoverlapping(home_str.as_ptr(), home_va as *mut u8, home_str.len());
+        core::ptr::write_volatile((home_va + home_str.len()) as *mut u8, 0u8);
+        wp -= ps1_alloc;
+        let ps1_va = wp;
+        core::ptr::copy_nonoverlapping(ps1_str.as_ptr(), ps1_va as *mut u8, ps1_str.len());
+        core::ptr::write_volatile((ps1_va + ps1_str.len()) as *mut u8, 0u8);
+        // PWD
+        let pwd_alloc = ((pwd_len + 1) + 7) & !7;
+        wp -= pwd_alloc;
+        let pwd_va = wp;
+        core::ptr::copy_nonoverlapping(pwd_buf.as_ptr(), pwd_va as *mut u8, pwd_len);
+        core::ptr::write_volatile((pwd_va + pwd_len) as *mut u8, 0u8);
+
         // Stack layout (bottom-up from p):
-        //   [argc] [argv[0]..argv[N-1]] [NULL] [NULL (envp term)] [auxv...]
+        //   [argc] [argv...] [NULL] [PS1] [PWD] [HOME] [NULL] [auxv...]
         p.write_volatile(argc as u64);
         let a = p.add(1);
         for i in 0..arg_idx {
             a.add(i).write_volatile(argv_ptrs[i] as u64);
         }
-        a.add(arg_idx).write_volatile(0);     // argv terminator
-        a.add(arg_idx + 1).write_volatile(0); // envp terminator
-        let auxv = a.add(arg_idx + 2);
+        a.add(arg_idx).write_volatile(0);                // argv terminator
+        a.add(arg_idx + 1).write_volatile(ps1_va as u64);  // PS1
+        a.add(arg_idx + 2).write_volatile(pwd_va as u64);  // PWD
+        a.add(arg_idx + 3).write_volatile(home_va as u64); // HOME
+        a.add(arg_idx + 4).write_volatile(0);              // envp terminator
+        let auxv = a.add(arg_idx + 5);
         unsafe { auxv.add(0).write_volatile(AT_PHDR); }
         unsafe { auxv.add(1).write_volatile(bootinfo.phdr_addr); }
         unsafe { auxv.add(2).write_volatile(AT_PHENT); }

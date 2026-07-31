@@ -54,6 +54,9 @@ struct BootInfo {
     phdr_addr: u64,
     phent_size: u64,
     phnum: u64,
+    argc: u64,
+    argv_buf: [u8; 2048],
+    cwd: [u8; 256],
 }
 
 // ---------------------------------------------------------------------------
@@ -157,14 +160,19 @@ pub fn run_init() -> ! {
     // ------------------------------------------------------------------
     use aarch64::base::mm::VirtAddr;
 
-    let bootinfo = BootInfo {
+    let mut bootinfo = BootInfo {
         program_entry: user_elf.entry as u64,
         stack_top: USER_STACK_TOP as u64,
         brk: user_elf.brk as u64,
         phdr_addr: user_elf.phdr_addr as u64,
         phent_size: user_elf.phent_size as u64,
         phnum: user_elf.phnum as u64,
+        argc: 0,
+        argv_buf: [0u8; 2048],
+        cwd: [0u8; 256],
     };
+    // Set initial working directory to "/"
+    bootinfo.cwd[0] = b'/';
 
     // Translate BOOTINFO_ADDR in the isolated PT to a physical address,
     // then write through the kernel identity mapping (phys == virt).
