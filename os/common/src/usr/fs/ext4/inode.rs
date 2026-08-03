@@ -727,6 +727,51 @@ impl Drop for Ext4Inode {
                 log::error!("[Ext4Inode::drop] inline data not found in page cache");
             }
         }
+        // Flush dirty page cache pages to disk for extent-tree-based inodes.
+        // Without this, data written via write() / write_extent_tree() (e.g.
+        // directory entries added by add_entry) is lost when the inode is
+        // evicted from memory, because the page cache has no other writeback
+        // mechanism.
+        if !inner.inode_on_disk.has_inline_data() && inner.inode_on_disk.use_extent_tree() {
+            let block_size = self.ext4_fs.upgrade()
+                .map(|fs| fs.block_size())
+                .unwrap_or(FS_BLOCK_SIZE);
+            let fs_blocks_per_page = PAGE_SIZE / block_size;
+            // Snapshot dirty pages under the address_space lock, then release
+            // it before doing extent lookups (which may acquire inner locks).
+            let dirty_pages: Vec<(usize, Arc<Mutex<Page>>)> = {
+                let address_space = self.address_space.lock();
+                address_space.i_pages().iter()
+                    .filter(|(_, page)| page.lock().dirty)
+                    .map(|(idx, page)| (*idx, page.clone()))
+                    .collect()
+            };
+            for (page_index, page_arc) in &dirty_pages {
+                let page = page_arc.lock();
+                if !page.dirty {
+                    continue;
+                }
+                let logical_block = *page_index as u32 * fs_blocks_per_page as u32;
+                if let Some(extent) = inner.inode_on_disk.lookup_extent(
+                    logical_block,
+                    self.block_device.clone(),
+                    block_size,
+                ) {
+                    let fs_block_id = extent.physical_start_block()
+                        + logical_block as usize - extent.logical_block as usize;
+                    log::info!(
+                        "[Ext4Inode::drop] flushing dirty page {} (logical block {}) to fs block {}",
+                        page_index, logical_block, fs_block_id
+                    );
+                    self.block_device.write(fs_block_id * block_size, &page.data);
+                } else {
+                    log::error!(
+                        "[Ext4Inode::drop] no extent for dirty page {} (logical block {})",
+                        page_index, logical_block
+                    );
+                }
+            }
+        }
         // Write inode back to disk
         write_inode_on_disk(
             &self,

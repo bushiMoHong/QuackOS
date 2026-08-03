@@ -53,6 +53,64 @@ struct BootInfo {
 /// Static buffer for reading the target ELF (64 KB, in .bss).
 static mut ELF_BUF: [u8; 65536] = [0u8; 65536];
 
+/// Static buffer for constructing full path from command name (256 B).
+static mut PATH_BUF: [u8; 256] = [0u8; 256];
+
+/// Parse a 64-bit little-endian ELF header and return (entry, brk, phdr_addr,
+/// phent_size, phnum).  Only processes PT_LOAD segments.
+fn parse_elf(elf: &[u8]) -> Result<(usize, usize, usize, usize, usize), &'static [u8]> {
+    // ELF header (64-bit LE)
+    if elf.len() < 64 {
+        return Err(b"sudo: ELF too short\n");
+    }
+    // Magic: \x7fELF
+    if elf[0] != 0x7f || elf[1] != b'E' || elf[2] != b'L' || elf[3] != b'F' {
+        return Err(b"sudo: bad ELF magic\n");
+    }
+    // 64-bit (class == 2) and little-endian (data == 1)
+    if elf[4] != 2 || elf[5] != 1 {
+        return Err(b"sudo: not 64-bit LE ELF\n");
+    }
+
+    let entry = u64::from_le_bytes(elf[24..32].try_into().unwrap()) as usize;
+    let phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
+    let phentsize = u16::from_le_bytes(elf[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
+
+    if phentsize == 0 || phnum == 0 {
+        return Err(b"sudo: ELF has no program headers\n");
+    }
+
+    // Scan PT_LOAD segments
+    let mut first_load_va = 0usize;
+    let mut data_end = 0usize;
+    for i in 0..phnum {
+        let off = phoff + i * phentsize;
+        if off + 56 > elf.len() {
+            return Err(b"sudo: ELF PHDR out of bounds\n");
+        }
+        let p_type = u32::from_le_bytes(elf[off..off+4].try_into().unwrap());
+        if p_type != 1 { continue; } // PT_LOAD
+
+        let p_vaddr = u64::from_le_bytes(elf[off+16..off+24].try_into().unwrap()) as usize;
+        let p_memsz = u64::from_le_bytes(elf[off+40..off+48].try_into().unwrap()) as usize;
+
+        if first_load_va == 0 || p_vaddr < first_load_va {
+            first_load_va = p_vaddr;
+        }
+        let seg_end = p_vaddr + p_memsz;
+        if seg_end > data_end {
+            data_end = seg_end;
+        }
+    }
+
+    let page_size = 4096;
+    let brk = (data_end + page_size - 1) & !(page_size - 1);
+    let phdr_addr = first_load_va + phoff;
+
+    Ok((entry, brk, phdr_addr, phentsize, phnum))
+}
+
 #[unsafe(no_mangle)]
 fn sudo_main(argc: usize, argv: *const *const u8) -> ! {
     let cmd = arg_bytes(argv, 1);
@@ -70,7 +128,34 @@ fn sudo_main(argc: usize, argv: *const *const u8) -> ! {
     // 1. Read the target ELF from the filesystem
     // ------------------------------------------------------------------
 
-    let fd = match fs::open(cmd_str) {
+    // Resolve the command path: if it's already absolute use it directly;
+    // otherwise try <cmd> first then /bin/<cmd> as a fallback.
+    let resolved: &str = if cmd_str.starts_with('/') {
+        cmd_str
+    } else {
+        let fd = fs::open(cmd_str);
+        if fd.is_ok() {
+            fs::close(fd.unwrap()).ok();
+            cmd_str
+        } else {
+            // Try /bin/<cmd>
+            let bin_ptr = (&raw mut PATH_BUF) as *mut u8;
+            let prefix = b"/bin/";
+            let cmd_len = cmd.len().min(255 - prefix.len());
+            let path_len = prefix.len() + cmd_len;
+            unsafe {
+                core::ptr::copy_nonoverlapping(prefix.as_ptr(), bin_ptr, prefix.len());
+                core::ptr::copy_nonoverlapping(cmd.as_ptr(), bin_ptr.add(prefix.len()), cmd_len);
+                bin_ptr.add(path_len).write(0);
+            }
+            let resolved_slice = unsafe {
+                core::slice::from_raw_parts(bin_ptr, path_len)
+            };
+            core::str::from_utf8(resolved_slice).unwrap_or("/bin/")
+        }
+    };
+
+    let fd = match fs::open(resolved) {
         Ok(f) => f,
         Err(_) => {
             console::write(b"sudo: open failed\n");
@@ -116,13 +201,34 @@ fn sudo_main(argc: usize, argv: *const *const u8) -> ! {
     }
 
     // ------------------------------------------------------------------
-    // 2. Build new argv in a static buffer (avoiding stack overflow)
+    // 2. Parse the target ELF to get entry point, brk, phdr info
+    // ------------------------------------------------------------------
+    let elf_slice = unsafe { core::slice::from_raw_parts(elf_ptr, total) };
+    let (entry, brk, phdr_addr, phent, phnum) = match parse_elf(elf_slice) {
+        Ok(info) => info,
+        Err(msg) => { console::write(msg); proc::exit(1); }
+    };
+
+    // Update BootInfo with the target program's values (preserve cwd)
+    unsafe {
+        let bi = &raw mut *(BOOTINFO_ADDR as *mut BootInfo);
+        (*bi).program_entry = entry as u64;
+        (*bi).brk = brk as u64;
+        (*bi).phdr_addr = phdr_addr as u64;
+        (*bi).phent_size = phent as u64;
+        (*bi).phnum = phnum as u64;
+    }
+
+    // ------------------------------------------------------------------
+    // 3. Build new argv in a static buffer (avoiding stack overflow)
     // ------------------------------------------------------------------
 
-    // Write directly into BootInfo's argv_buf to save stack space
+    // Write directly into BootInfo's argv_buf to save stack space.
+    // argv_buf is at offset 56 from BOOTINFO_ADDR (field layout verified).
+    const ARGV_BUF_OFFSET: usize = 56;
     let mut new_argc = 0u64;
     let mut wp = 0usize;
-    let argv_dst = unsafe { &raw mut (*(BOOTINFO_ADDR as *mut BootInfo)).argv_buf as *mut u8 };
+    let argv_dst = (BOOTINFO_ADDR + ARGV_BUF_OFFSET) as *mut u8;
 
     for i in 1..argc {
         if new_argc >= 128 || wp >= 2047 {
@@ -153,7 +259,7 @@ fn sudo_main(argc: usize, argv: *const *const u8) -> ! {
     }
 
     // ------------------------------------------------------------------
-    // 3. Set argc in BootInfo
+    // 4. Set argc in BootInfo
     // ------------------------------------------------------------------
 
     unsafe {
@@ -161,7 +267,7 @@ fn sudo_main(argc: usize, argv: *const *const u8) -> ! {
     }
 
     // ------------------------------------------------------------------
-    // 4. Exec the target program (does not return on success)
+    // 5. Exec the target program (does not return on success)
     // ------------------------------------------------------------------
 
     let elf_slice = unsafe { core::slice::from_raw_parts(elf_ptr, total) };
