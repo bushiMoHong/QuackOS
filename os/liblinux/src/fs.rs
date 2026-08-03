@@ -421,37 +421,84 @@ pub fn sys_chdir(task: &mut TaskStruct, path_ptr: usize) -> u64 {
     };
     if len == 0 { return 0; }
 
-    // Resolve relative paths against current CWD
-    let mut abs = [0u8; 256];
-    let abs_len: usize;
+    // Build the raw absolute path
+    let mut raw = [0u8; 256];
+    let raw_len: usize;
     if path[0] != b'/' {
         let cwd_end = task.cwd.iter().position(|&b| b == 0).unwrap_or(256);
         let cwd_len = cwd_end.min(254);
-        abs[..cwd_len].copy_from_slice(&task.cwd[..cwd_len]);
+        raw[..cwd_len].copy_from_slice(&task.cwd[..cwd_len]);
         let mut wp = cwd_len;
-        if wp > 0 && abs[wp - 1] != b'/' {
-            abs[wp] = b'/'; wp += 1;
+        if wp > 0 && raw[wp - 1] != b'/' {
+            raw[wp] = b'/'; wp += 1;
         }
         let copy = len.min(255 - wp);
-        abs[wp..wp + copy].copy_from_slice(&path[..copy]);
+        raw[wp..wp + copy].copy_from_slice(&path[..copy]);
         wp += copy;
-        abs_len = wp;
+        raw_len = wp;
     } else {
         let copy = len.min(255);
-        abs[..copy].copy_from_slice(&path[..copy]);
-        abs_len = copy;
+        raw[..copy].copy_from_slice(&path[..copy]);
+        raw_len = copy;
     }
+
+    // Canonicalize: resolve . and .. components.
+    // Store (byte_offset, byte_len) for each valid component.
+    let mut comp_off: [usize; 64] = [0; 64];
+    let mut comp_len: [usize; 64] = [0; 64];
+    let mut depth: usize = 0;
+    let mut pos = 0usize;
+
+    while pos < raw_len {
+        // Skip slashes
+        while pos < raw_len && raw[pos] == b'/' { pos += 1; }
+        if pos >= raw_len { break; }
+
+        // Find end of this component
+        let start = pos;
+        while pos < raw_len && raw[pos] != b'/' { pos += 1; }
+        let comp = &raw[start..pos];
+
+        if comp == b"." {
+            // skip
+        } else if comp == b".." {
+            if depth > 0 { depth -= 1; }
+        } else {
+            if depth < 64 {
+                comp_off[depth] = start;
+                comp_len[depth] = comp.len();
+                depth += 1;
+            }
+        }
+    }
+
+    // Rebuild canonical path
+    let mut cwd = [0u8; 256];
+    let mut wp = 0usize;
+    if depth == 0 {
+        cwd[0] = b'/';
+        wp = 1;
+    } else {
+        for i in 0..depth {
+            cwd[wp] = b'/';
+            wp += 1;
+            let cl = comp_len[i].min(255 - wp);
+            cwd[wp..wp + cl].copy_from_slice(&raw[comp_off[i]..comp_off[i] + cl]);
+            wp += cl;
+        }
+    }
+
     task.cwd = [0u8; 256];
-    task.cwd[..abs_len].copy_from_slice(&abs[..abs_len]);
+    task.cwd[..wp].copy_from_slice(&cwd[..wp]);
 
     let bootinfo_cwd = (BOOTINFO_ADDR + 2104) as *mut u8;
     unsafe {
         let mut i = 0usize;
-        while i < abs_len {
-            core::ptr::write_volatile(bootinfo_cwd.add(i), abs[i]);
+        while i < wp {
+            core::ptr::write_volatile(bootinfo_cwd.add(i), cwd[i]);
             i += 1;
         }
-        core::ptr::write_volatile(bootinfo_cwd.add(abs_len), 0u8);
+        core::ptr::write_volatile(bootinfo_cwd.add(wp), 0u8);
     }
 
     0
