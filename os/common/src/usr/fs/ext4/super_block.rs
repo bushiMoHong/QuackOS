@@ -25,6 +25,10 @@ pub struct Ext4SuperBlock {
     // 孤立的inode列表
     pub orphan_inodes: RwLock<Vec<usize>>,
 
+    // metadata_csum support
+    pub feature_ro_compat: u32,
+    pub checksum_seed: u32,
+
     pub inner: RwLock<SuperBlockInner>,
 }
 
@@ -62,6 +66,8 @@ impl Ext4SuperBlock {
             inode_size: super_block.inode_size,
             block_group_count,
             orphan_inodes: RwLock::new(Vec::new()),
+            feature_ro_compat: super_block.feature_ro_compat,
+            checksum_seed: super_block.checksum_seed,
             inner: RwLock::new(SuperBlockInner::new(
                 super_block.free_inodes_count,
                 super_block.free_blocks_count(),
