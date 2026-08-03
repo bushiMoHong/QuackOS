@@ -746,6 +746,7 @@ impl Drop for Ext4Inode {
                     .map(|(idx, page)| (*idx, page.clone()))
                     .collect()
             };
+            let inode_size = inner.inode_on_disk.get_size() as usize;
             for (page_index, page_arc) in &dirty_pages {
                 let page = page_arc.lock();
                 if !page.dirty {
@@ -759,11 +760,25 @@ impl Drop for Ext4Inode {
                 ) {
                     let fs_block_id = extent.physical_start_block()
                         + logical_block as usize - extent.logical_block as usize;
-                    log::info!(
-                        "[Ext4Inode::drop] flushing dirty page {} (logical block {}) to fs block {}",
-                        page_index, logical_block, fs_block_id
-                    );
-                    self.block_device.write(fs_block_id * block_size, &page.data);
+                    // Only write up to the inode's actual size — never
+                    // overflow into adjacent blocks that belong to other
+                    // files or filesystem metadata.
+                    let page_start = *page_index * PAGE_SIZE;
+                    let bytes_to_write = if inode_size > page_start {
+                        (inode_size - page_start).min(PAGE_SIZE)
+                    } else {
+                        0
+                    };
+                    if bytes_to_write > 0 {
+                        log::info!(
+                            "[Ext4Inode::drop] flushing dirty page {} (logical block {}) to fs block {}, {} bytes",
+                            page_index, logical_block, fs_block_id, bytes_to_write
+                        );
+                        self.block_device.write(
+                            fs_block_id * block_size,
+                            &page.data[..bytes_to_write],
+                        );
+                    }
                 } else {
                     log::error!(
                         "[Ext4Inode::drop] no extent for dirty page {} (logical block {})",
