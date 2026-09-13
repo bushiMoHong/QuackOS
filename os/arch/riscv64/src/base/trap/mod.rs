@@ -6,8 +6,7 @@ use riscv::register::{
     scause::{self, Exception, Interrupt, Trap},
     sepc, sie,
     sstatus::{self, SPP},
-    stval, stvec,
-    utvec::TrapMode,
+    stval, stvec::{self, TrapMode},
 };
 
 use crate::{

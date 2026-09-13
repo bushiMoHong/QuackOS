@@ -57,3 +57,19 @@ pub fn shutdown(failure: bool) -> ! {
 pub fn hart_start(hart_id: usize, start_addr: usize) -> usize {
     sbi_call(SBI_HART_START, hart_id, start_addr, 0)
 }
+
+// ---------------------------------------------------------------------------
+// Console output (for `print!` / `println!` macros in lib.rs)
+// ---------------------------------------------------------------------------
+use core::fmt::{self, Write};
+
+pub struct SbiConsole;
+
+impl Write for SbiConsole {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for c in s.bytes() {
+            console_putchar(c as usize);
+        }
+        Ok(())
+    }
+}

@@ -6,7 +6,7 @@ use crate::usr::fs::dev::block_dev::BlockDevice;
 use super::block_group::{self, Ext4GroupDescDisk, GroupDesc};
 use super::super_block::{Ext4SuperBlock, Ext4SuperBlockDisk};
 use super::block_op::EXT4_BLOCK_SIZE;
-use super::inode::read_block;
+use super::inode::{crc32c, read_block, write_block};
 
 // ---------------------------------------------------------------------------
 // Ext4FileSystem
@@ -57,7 +57,7 @@ impl Ext4FileSystem {
             let offset = i * core::mem::size_of::<Ext4GroupDescDisk>();
             let group_desc: &Ext4GroupDescDisk =
                 unsafe { &*(bg_data.as_ptr().add(offset) as *const Ext4GroupDescDisk) };
-            block_groups.push(Arc::new(GroupDesc::new(group_desc)));
+            block_groups.push(Arc::new(GroupDesc::new(group_desc, i as u32)));
         }
         log::info!("Group 0 inode_table: {}", block_groups[0].inode_table());
 
@@ -80,6 +80,8 @@ impl Ext4FileSystem {
                 self.super_block.inner.write().free_inodes_count -= 1;
                 let global_inode_num =
                     local_inode_num + self.super_block.inodes_per_group as usize * i + 1;
+                self.write_group_desc(i);
+                self.write_superblock();
                 return global_inode_num;
             }
         }
@@ -104,6 +106,8 @@ impl Ext4FileSystem {
             self.block_size(),
             block_bitmap_size,
         );
+        self.write_group_desc(group_id);
+        self.write_superblock();
     }
 
     pub fn add_orphan_inode(&self, inode_num: usize) {
@@ -125,6 +129,8 @@ impl Ext4FileSystem {
                 let zeroes = vec![0u8; bs];
                 self.block_device
                     .write(global_start * bs, &zeroes);
+                self.write_group_desc(i);
+                self.write_superblock();
                 return global_start;
             }
         }
@@ -151,6 +157,9 @@ impl Ext4FileSystem {
                 block_bitmap_size,
                 remaining,
             );
+            if allocated.is_empty() {
+                continue;
+            }
             for (local_start, count) in allocated {
                 let global_start =
                     local_start + self.super_block.blocks_per_group as usize * i;
@@ -166,6 +175,8 @@ impl Ext4FileSystem {
                     break;
                 }
             }
+            self.write_group_desc(i);
+            self.write_superblock();
         }
         result
     }
@@ -187,6 +198,106 @@ impl Ext4FileSystem {
             block_bitmap_size,
         );
         self.super_block.inner.write().free_blocks_count += block_count as u64;
+        self.write_group_desc(group_id);
+        self.write_superblock();
+    }
+
+    /// Compute a bitmap checksum: crc32c(s_csum_seed, bitmap_data).
+    /// Per the kernel, the group number is NOT included in the bitmap checksum.
+    fn compute_bitmap_csum(&self, bitmap_block: usize, bitmap_bytes: usize) -> u32 {
+        let data = read_block(&self.block_device, bitmap_block, self.block_size());
+        crc32c(self.super_block.checksum_seed, &data[..bitmap_bytes.min(data.len())])
+    }
+
+    /// Write the group descriptor back to disk with updated counters and
+    /// recomputed checksums (metadata_csum).  This is required because
+    /// alloc/dealloc modify the bitmaps and in-memory counters, but the
+    /// on-disk group descriptor was previously never updated.
+    pub fn write_group_desc(&self, group_id: usize) {
+        if self.super_block.feature_ro_compat & 0x400 == 0 {
+            return;
+        }
+        let block_size = self.block_size();
+        let desc_size = core::mem::size_of::<Ext4GroupDescDisk>();
+        let gdt_block = (EXT4_SUPERBLOCK_OFFSET / block_size) + 1;
+        let desc_per_block = block_size / desc_size;
+        let block_num = gdt_block + group_id / desc_per_block;
+        let offset_in_block = (group_id % desc_per_block) * desc_size;
+
+        let group = &self.block_groups[group_id];
+        let group_num = group.group_num;
+
+        // Snapshot in-memory counters
+        let free_blocks = group.free_blocks_count();
+        let free_inodes = group.free_inodes_count();
+        let used_dirs = group.used_dirs_count();
+        let itable_unused = group.itable_unused();
+
+        // Compute bitmap checksums from the current on-disk bitmaps
+        let block_bitmap_csum = self.compute_bitmap_csum(
+            group.block_bitmap as usize,
+            self.super_block.blocks_per_group as usize / 8,
+        );
+        let inode_bitmap_csum = self.compute_bitmap_csum(
+            group.inode_bitmap as usize,
+            self.super_block.inodes_per_group as usize / 8,
+        );
+
+        // Read-modify-write the group descriptor block
+        let mut data = read_block(&self.block_device, block_num, block_size);
+        let gdp = unsafe {
+            &mut *(data.as_mut_ptr().add(offset_in_block) as *mut Ext4GroupDescDisk)
+        };
+        gdp.set_free_blocks_count(free_blocks);
+        gdp.set_free_inodes_count(free_inodes);
+        gdp.set_used_dirs_count(used_dirs);
+        gdp.set_itable_unused(itable_unused);
+        gdp.set_block_bitmap_csum(block_bitmap_csum);
+        gdp.set_inode_bitmap_csum(inode_bitmap_csum);
+        // Zero the descriptor checksum field before computing
+        gdp.set_checksum(0);
+
+        // Compute the group descriptor checksum (metadata_csum variant)
+        let gdp_bytes = &data[offset_in_block..offset_in_block + desc_size];
+        let group_num_le = (group_num).to_le_bytes();
+        let mut csum = crc32c(self.super_block.checksum_seed, &group_num_le);
+        csum = crc32c(csum, &gdp_bytes[..0x1E]);
+        csum = crc32c(csum, &[0u8, 0u8]);
+        if desc_size > 0x20 {
+            csum = crc32c(csum, &gdp_bytes[0x20..desc_size]);
+        }
+        let desc_csum = (csum & 0xFFFF) as u16;
+        gdp.set_checksum(desc_csum);
+
+        write_block(&self.block_device, block_num, &data, block_size);
+    }
+
+    /// Write the superblock back to disk with updated free counts and a
+    /// recomputed superblock checksum.
+    pub fn write_superblock(&self) {
+        if self.super_block.feature_ro_compat & 0x400 == 0 {
+            return;
+        }
+        let block_size = self.block_size();
+        let (free_inodes, free_blocks) = {
+            let inner = self.super_block.inner.read();
+            (inner.free_inodes_count, inner.free_blocks_count)
+        };
+
+        let mut data = read_block(&self.block_device, 0, block_size);
+        let sb = unsafe {
+            &mut *(data.as_mut_ptr().add(EXT4_SUPERBLOCK_OFFSET) as *mut Ext4SuperBlockDisk)
+        };
+        sb.set_free_inodes_count(free_inodes);
+        sb.set_free_blocks_count(free_blocks);
+        // Zero the superblock checksum field before computing
+        sb.checksum = 0;
+
+        // Superblock checksum: crc32c(~0, sb_data[0..0x3FC])
+        let csum = crc32c(!0, &data[EXT4_SUPERBLOCK_OFFSET..EXT4_SUPERBLOCK_OFFSET + 0x3FC]);
+        sb.checksum = csum;
+
+        write_block(&self.block_device, 0, &data, block_size);
     }
 }
 

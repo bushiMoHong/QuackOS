@@ -156,8 +156,8 @@ pub struct Ext4InodeDisk {
     pub block: [u8; 60],
     pub generation: u32,
     pub file_acl_lo: u32,
-    pub obso_faddr: u32,
     pub size_hi: u32,
+    pub obso_faddr: u32,
     pub osd2: [u32; 3],
     pub extra_isize: u16,
     pub checksum_hi: u16,
@@ -717,25 +717,6 @@ pub struct Ext4Inode {
 impl Drop for Ext4Inode {
     fn drop(&mut self) {
         let mut inner = self.inner.write();
-        let ino = self.inode_num;
-        let is_dir = inner.inode_on_disk.mode & S_IFDIR == S_IFDIR;
-        let has_inline = inner.inode_on_disk.has_inline_data();
-        let has_extents = inner.inode_on_disk.use_extent_tree();
-        crate::print_uart("[drop] ino=");
-        crate::print_uart_hex(ino as u64);
-        crate::print_uart(" mode=");
-        crate::print_uart_hex(inner.inode_on_disk.mode as u64);
-        crate::print_uart(" size=");
-        crate::print_uart_hex(inner.inode_on_disk.get_size());
-        crate::print_uart(" flags=");
-        crate::print_uart_hex(inner.inode_on_disk.flags as u64);
-        crate::print_uart(" dir=");
-        crate::print_uart_hex(is_dir as u64);
-        crate::print_uart(" inline=");
-        crate::print_uart_hex(has_inline as u64);
-        crate::print_uart(" extents=");
-        crate::print_uart_hex(has_extents as u64);
-        crate::print_uart("\n");
         // Write inline data back to disk
         if inner.inode_on_disk.has_inline_data() {
             if let Some(inline_page) = self.address_space.lock().get_page_cache(0) {
@@ -789,22 +770,6 @@ impl Drop for Ext4Inode {
                         0
                     };
                     if bytes_to_write > 0 {
-                        crate::print_uart("[drop-flush] ino=");
-                        crate::print_uart_hex(ino as u64);
-                        crate::print_uart(" page=");
-                        crate::print_uart_hex(*page_index as u64);
-                        crate::print_uart(" logblk=");
-                        crate::print_uart_hex(logical_block as u64);
-                        crate::print_uart(" fsblk=");
-                        crate::print_uart_hex(fs_block_id as u64);
-                        crate::print_uart(" bytes=");
-                        crate::print_uart_hex(bytes_to_write as u64);
-                        crate::print_uart(" head=");
-                        for k in 0..16 {
-                            crate::print_uart_hex(page.data[k] as u64);
-                            crate::print_uart(" ");
-                        }
-                        crate::print_uart("\n");
                         self.block_device.write(
                             fs_block_id * block_size,
                             &page.data[..bytes_to_write],
@@ -925,6 +890,7 @@ impl Ext4Inode {
             modify_file_time_extra: time_extra,
             atime: time,
             atime_extra: time_extra,
+            extra_isize: 32,
             ..Default::default()
         };
         if flags & EXT4_EXTENTS_FL == EXT4_EXTENTS_FL {
@@ -1866,6 +1832,23 @@ impl Ext4Inode {
 // ---------------------------------------------------------------------------
 
 impl Ext4Inode {
+    /// Recompute the directory block checksum stored in the dirent tail.
+    ///
+    /// With metadata_csum, each directory data block ends with a 12-byte
+    /// `ext4_dir_entry_tail` whose `det_checksum` is crc32c(i_csum_seed,
+    /// dirent[0..tail_offset]).  Must be called after modifying directory
+    /// contents and before writing the block back.
+    fn set_dirblock_csum(&self, buf: &mut [u8]) {
+        let tail_off = buf.len() - 12;
+        let seed = self.ext4_fs.upgrade().unwrap().super_block.checksum_seed;
+        let generation = self.inner.read().inode_on_disk.generation;
+        let inum_le = (self.inode_num as u32).to_le_bytes();
+        let gen_le = generation.to_le_bytes();
+        let i_csum_seed = crc32c(crc32c(seed, &inum_le), &gen_le);
+        let csum = crc32c(i_csum_seed, &buf[..tail_off]);
+        buf[tail_off + 8..tail_off + 12].copy_from_slice(&csum.to_le_bytes());
+    }
+
     pub fn set_entry(&self, old_name: &str, new_inode_num: u32, new_file_type: u8) {
         debug_assert!(self.inner.read().inode_on_disk.is_dir(), "not a directory");
         log::info!(
@@ -1885,6 +1868,7 @@ impl Ext4Inode {
         dir_content
             .set_entry(old_name, new_inode_num, new_file_type)
             .expect("Ext4Inode::set_dentry failed");
+        self.set_dirblock_csum(&mut buf);
         self.write(0, &buf);
     }
 
@@ -1907,6 +1891,7 @@ impl Ext4Inode {
         match dir_content.add_entry(&dentry.get_last_name(), inode_num, file_type) {
             Ok(_) => {
                 log::info!("[Ext4Inode::add_entry] add entry success");
+                self.set_dirblock_csum(&mut buf);
                 self.write(0, &buf);
             }
             Err(e) => {
@@ -1946,6 +1931,7 @@ impl Ext4Inode {
         self.read(0, &mut buf).expect("read failed");
         let mut dir_content = Ext4DirContentWE::new(&mut buf);
         dir_content.delete_entry(name, inode_num)?;
+        self.set_dirblock_csum(&mut buf);
         self.write(0, &buf);
         Ok(())
     }
@@ -2069,9 +2055,11 @@ impl Ext4Inode {
     }
 
     pub fn set_size(&self, size: u64) {
-        const BLOCK_SIZE: u64 = 512;
         let mut inner_guard = self.inner.write();
-        let new_blocks_count = (size + BLOCK_SIZE - 1) / BLOCK_SIZE as u64;
+        // i_blocks counts whole filesystem blocks in 512-byte sectors.
+        let fs_block_size = self.get_block_size() as u64;
+        let sectors_per_block = fs_block_size / 512;
+        let new_blocks_count = ((size + fs_block_size - 1) / fs_block_size) * sectors_per_block;
         inner_guard.inode_on_disk.set_size(size);
         inner_guard.inode_on_disk.set_blocks(new_blocks_count);
     }
@@ -2180,11 +2168,32 @@ pub fn write_inode(inode: &Ext4Inode, inode_num: usize, block_device: Arc<dyn Bl
     let inode_on_disk = &inode.inner.read().inode_on_disk;
     let dst = unsafe { &mut *(data.as_mut_ptr().add(inner_offset) as *mut Ext4InodeDisk) };
     *dst = *inode_on_disk;
+
+    // Recompute inode checksum for metadata_csum.
+    // The 32-bit checksum is split across two u16 fields:
+    //   - l_i_checksum_lo at inode byte 0x7C = 124
+    //   - i_checksum_hi   at inode byte 0x82 = 130
+    let inode_size = ext4_fs.super_block.inode_size as usize;
+    if ext4_fs.super_block.feature_ro_compat & 0x400 != 0 {
+        let csum_lo_off = inner_offset + 0x7C;
+        let csum_hi_off = inner_offset + 0x82;
+        let generation = inode_on_disk.generation;
+        let csum = compute_inode_checksum(
+            ext4_fs.super_block.checksum_seed,
+            inode_num as u32,
+            generation,
+            &mut data[inner_offset..inner_offset + inode_size],
+        );
+        let csum_bytes = csum.to_le_bytes();
+        data[csum_lo_off..csum_lo_off + 2].copy_from_slice(&csum_bytes[..2]);
+        data[csum_hi_off..csum_hi_off + 2].copy_from_slice(&csum_bytes[2..]);
+    }
+
     write_block(&block_device, fs_block_id, &data, ext4_fs.super_block.block_size as usize);
 }
 
 /// CRC32C (Castagnoli) using polynomial 0x1EDC6F41.
-fn crc32c(mut crc: u32, data: &[u8]) -> u32 {
+pub(crate) fn crc32c(mut crc: u32, data: &[u8]) -> u32 {
     // Pre-computed table for crc32c (polynomial 0x1EDC6F41, reflected 0x82F63B78)
     static TABLE: [u32; 256] = [
         0x00000000, 0xF26B8303, 0xE13B70F7, 0x1350F3F4, 0xC79A971F, 0x35F1141C, 0x26A1E7E8, 0xD4CA64EB,
@@ -2227,6 +2236,28 @@ fn crc32c(mut crc: u32, data: &[u8]) -> u32 {
     crc
 }
 
+/// Compute the ext4 inode metadata checksum (metadata_csum).
+///
+/// Per the kernel's `ext4_inode_csum`, the seed is derived from the inode
+/// number and generation: `i_csum_seed = crc32c(crc32c(s_csum_seed, inum_le),
+/// generation_le)`, then the checksum is `crc32c(i_csum_seed, raw_inode)` with
+/// the two checksum fields (`l_i_checksum_lo` at 0x7C, `i_checksum_hi` at 0x82)
+/// zeroed.
+fn compute_inode_checksum(
+    checksum_seed: u32,
+    inode_num: u32,
+    generation: u32,
+    raw_inode: &mut [u8],
+) -> u32 {
+    // Zero the two checksum fields before computing.
+    raw_inode[0x7C..0x7E].fill(0);
+    raw_inode[0x82..0x84].fill(0);
+    let ino_le = inode_num.to_le_bytes();
+    let gen_le = generation.to_le_bytes();
+    let i_csum_seed = crc32c(crc32c(checksum_seed, &ino_le), &gen_le);
+    crc32c(i_csum_seed, raw_inode)
+}
+
 pub fn write_inode_on_disk(
     dir_inode: &Ext4Inode,
     inode_on_disk: &Ext4InodeDisk,
@@ -2244,16 +2275,6 @@ pub fn write_inode_on_disk(
         index * ext4_fs.super_block.inode_size as usize % ext4_fs.super_block.block_size as usize;
     let fs_block_id = inode_table_block_id + outer_offset;
 
-    crate::print_uart("[write_ino] ino=");
-    crate::print_uart_hex(inode_num as u64);
-    crate::print_uart(" fsblk=");
-    crate::print_uart_hex(fs_block_id as u64);
-    crate::print_uart(" off=");
-    crate::print_uart_hex(inner_offset as u64);
-    crate::print_uart(" mode=");
-    crate::print_uart_hex(inode_on_disk.mode as u64);
-    crate::print_uart("\n");
-
     // Read-modify-write the inode table block
     let inode_size = ext4_fs.super_block.inode_size as usize;
     let mut data = read_block(&block_device, fs_block_id, ext4_fs.super_block.block_size as usize);
@@ -2261,21 +2282,23 @@ pub fn write_inode_on_disk(
     *dst = inode_on_disk.clone();
 
     // Recompute inode checksum for metadata_csum.
-    // The checksum is a u32 at l_i_checksum_lo (offset 0x7C in the inode,
-    // which is osd2[2] in Ext4InodeDisk).  It covers the full inode_size
-    // bytes with the checksum field zeroed.
-    // Formula: crc32c(crc32c(s_checksum_seed, inode_number_le), raw_inode)
-    if ext4_fs.super_block.feature_ro_compat & 0x800 != 0 { // metadata_csum
+    // The 32-bit checksum is split across two u16 fields:
+    //   - l_i_checksum_lo at inode byte 0x7C = 124
+    //   - i_checksum_hi   at inode byte 0x82 = 130
+    if ext4_fs.super_block.feature_ro_compat & 0x400 != 0 {
+        let csum_lo_off = inner_offset + 0x7C;
+        let csum_hi_off = inner_offset + 0x82;
         let csum_seed = ext4_fs.super_block.checksum_seed;
-        let ino_le = (inode_num as u32).to_le_bytes();
-        // Zero the checksum field (osd2[2] = bytes 124-127 of the inode)
-        let csum_off = inner_offset + 124;
-        data[csum_off..csum_off + 4].fill(0);
-        // Compute: crc32c(crc32c(seed, inum_le), raw_inode)
-        let mut csum = crc32c(csum_seed, &ino_le);
-        csum = crc32c(csum, &data[inner_offset..inner_offset + inode_size]);
+        let generation = inode_on_disk.generation;
+        let csum = compute_inode_checksum(
+            csum_seed,
+            inode_num as u32,
+            generation,
+            &mut data[inner_offset..inner_offset + inode_size],
+        );
         let csum_bytes = csum.to_le_bytes();
-        data[csum_off..csum_off + 4].copy_from_slice(&csum_bytes);
+        data[csum_lo_off..csum_lo_off + 2].copy_from_slice(&csum_bytes[..2]);
+        data[csum_hi_off..csum_hi_off + 2].copy_from_slice(&csum_bytes[2..]);
     }
 
     write_block(&block_device, fs_block_id, &data, ext4_fs.super_block.block_size as usize);

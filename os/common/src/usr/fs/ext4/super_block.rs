@@ -18,6 +18,7 @@ pub struct Ext4SuperBlock {
 
     // rev_level为1时, 以下字段有效
     pub inode_size: u16, // inode的大小
+    pub desc_size: u16,  // 块组描述符大小
 
     // 推理出的字段
     pub block_group_count: u32, // 块组总数
@@ -64,6 +65,7 @@ impl Ext4SuperBlock {
             clusters_per_group: super_block.clusters_per_group,
             inodes_per_group: super_block.inodes_per_group,
             inode_size: super_block.inode_size,
+            desc_size: super_block.desc_size,
             block_group_count,
             orphan_inodes: RwLock::new(Vec::new()),
             feature_ro_compat: super_block.feature_ro_compat,
@@ -234,7 +236,7 @@ pub struct Ext4SuperBlockDisk {
     encoding_flags: u16,       // 文件名编码标志
     orphan_file_ino: u32,      // orphan文件的inode
     reserved: [u32; 94],       // 保留字段
-    checksum: u32,             // crc32c(superblock)
+    pub checksum: u32,         // crc32c(superblock)
 }
 
 const EXT4_VALID_FS: u16 = 1;
@@ -273,5 +275,14 @@ impl Ext4SuperBlockDisk {
     }
     pub fn free_blocks_count(&self) -> u64 {
         self.free_blocks_count_lo as u64 | ((self.free_blocks_count_hi as u64) << 32)
+    }
+
+    pub fn set_free_inodes_count(&mut self, count: u32) {
+        self.free_inodes_count = count;
+    }
+
+    pub fn set_free_blocks_count(&mut self, count: u64) {
+        self.free_blocks_count_lo = (count & 0xFFFF_FFFF) as u32;
+        self.free_blocks_count_hi = (count >> 32) as u32;
     }
 }

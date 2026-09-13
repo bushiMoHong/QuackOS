@@ -6,8 +6,15 @@
 #   make run       Build and run in QEMU (delegates to os/)
 #   make clean     Remove image and build artifacts
 #
+# 架构选择 (arm | rv | la):
+#   make run ARCH=rv
+#   make run ARCH=la
+#   make arm / make rv / make la (仅编译)
+#
 # Typical workflow:
 #   ./update-bin.sh && make image && make run
+
+ARCH ?= arm
 
 IMG     = image.img
 SIZE_MB = 128
@@ -19,7 +26,11 @@ BIN_DIR = bin
 
 .PHONY: all
 all:
-	$(MAKE) -C os all
+	$(MAKE) -C os all ARCH=$(ARCH)
+
+.PHONY: arm rv la
+arm rv la:
+	$(MAKE) -C os $@ ARCH=$@
 
 # ---------------------------------------------------------------------------
 # Disk image
@@ -34,6 +45,7 @@ image:
 	@mkdir -p mnt
 	sudo mount -o loop $(IMG) mnt
 	sudo mkdir -p mnt/bin
+	sudo mkdir -p mnt/tmp
 	@echo "==> Copying $(BIN_DIR)/* → $(IMG):/bin/"
 	sudo cp -a $(BIN_DIR)/* mnt/bin/
 	sudo chmod 755 mnt/bin/*
@@ -48,7 +60,7 @@ image:
 
 .PHONY: run
 run:
-	$(MAKE) -C os run
+	$(MAKE) -C os run ARCH=$(ARCH)
 
 # ---------------------------------------------------------------------------
 # Mount helpers (for manual inspection)

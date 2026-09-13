@@ -62,6 +62,34 @@ impl Ext4GroupDescDisk {
     pub fn itable_unused(&self) -> u32 {
         (self.itable_unused_hi as u32) << 16 | self.itable_unused_lo as u32
     }
+
+    pub fn set_free_blocks_count(&mut self, count: u32) {
+        self.free_blocks_count_lo = (count & 0xFFFF) as u16;
+        self.free_blocks_count_hi = (count >> 16) as u16;
+    }
+    pub fn set_free_inodes_count(&mut self, count: u32) {
+        self.free_inodes_count_lo = (count & 0xFFFF) as u16;
+        self.free_inodes_count_hi = (count >> 16) as u16;
+    }
+    pub fn set_used_dirs_count(&mut self, count: u32) {
+        self.used_dirs_count_lo = (count & 0xFFFF) as u16;
+        self.used_dirs_count_hi = (count >> 16) as u16;
+    }
+    pub fn set_itable_unused(&mut self, count: u32) {
+        self.itable_unused_lo = (count & 0xFFFF) as u16;
+        self.itable_unused_hi = (count >> 16) as u16;
+    }
+    pub fn set_block_bitmap_csum(&mut self, csum: u32) {
+        self.block_bitmap_csum_lo = (csum & 0xFFFF) as u16;
+        self.block_bitmap_csum_hi = (csum >> 16) as u16;
+    }
+    pub fn set_inode_bitmap_csum(&mut self, csum: u32) {
+        self.inode_bitmap_csum_lo = (csum & 0xFFFF) as u16;
+        self.inode_bitmap_csum_hi = (csum >> 16) as u16;
+    }
+    pub fn set_checksum(&mut self, csum: u16) {
+        self.checksum = csum;
+    }
 }
 
 #[allow(dead_code)]
@@ -70,6 +98,7 @@ pub struct GroupDesc {
     pub block_bitmap: u64,
     pub inode_bitmap: u64,
     pub exclude_bitmap: u64,
+    pub group_num: u32,
 
     inner: RwLock<GroupDescInner>,
 }
@@ -81,13 +110,14 @@ impl GroupDesc {
 }
 
 impl GroupDesc {
-    pub fn new(group_desc_disk: &Ext4GroupDescDisk) -> Self {
+    pub fn new(group_desc_disk: &Ext4GroupDescDisk, group_num: u32) -> Self {
         Self {
             inode_table: group_desc_disk.inode_table(),
             block_bitmap: group_desc_disk.block_bitmap(),
             inode_bitmap: group_desc_disk.inode_bitmap(),
             exclude_bitmap: (group_desc_disk.exclude_bitmap_hi as u64) << 32
                 | group_desc_disk.exclude_bitmap_lo as u64,
+            group_num,
             inner: RwLock::new(GroupDescInner::new(
                 group_desc_disk.free_blocks_count(),
                 group_desc_disk.free_inodes_count(),
@@ -95,6 +125,19 @@ impl GroupDesc {
                 group_desc_disk.itable_unused(),
             )),
         }
+    }
+
+    pub fn free_blocks_count(&self) -> u32 {
+        self.inner.read().free_blocks_count
+    }
+    pub fn free_inodes_count(&self) -> u32 {
+        self.inner.read().free_inodes_count
+    }
+    pub fn used_dirs_count(&self) -> u32 {
+        self.inner.read().used_dirs_count
+    }
+    pub fn itable_unused(&self) -> u32 {
+        self.inner.read().itable_unused
     }
 
     /// 在块组的inode_bitmap中分配一个inode
@@ -119,6 +162,9 @@ impl GroupDesc {
                 if result.is_some() {
                     write_ext4_block(&block_device, block_id, &block_data, ext4_block_size);
                     inner.free_inodes_count -= 1;
+                    if inner.itable_unused > 0 {
+                        inner.itable_unused -= 1;
+                    }
                     if is_dir {
                         inner.used_dirs_count += 1;
                     }
@@ -163,6 +209,7 @@ impl GroupDesc {
         write_ext4_block(&block_device, bitmap_block_id, &bitmap_data, ext4_block_size);
 
         inner.free_inodes_count += 1;
+        inner.itable_unused += 1;
         if is_dir {
             inner.used_dirs_count -= 1;
         }
