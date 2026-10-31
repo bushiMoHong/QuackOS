@@ -6,7 +6,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use aarch64::base::config::PAGE_SIZE;
+use crate::arch::base::config::PAGE_SIZE;
 
 // ---------------------------------------------------------------------------
 // Page — a cached page of file data

@@ -30,7 +30,12 @@ use crate::kernel::bmm::{self, create_kernel_mapped_page_table};
 // ---------------------------------------------------------------------------
 // Embedded liblinux ELF (built by Makefile before the kernel)
 // ---------------------------------------------------------------------------
+#[cfg(target_arch = "aarch64")]
 const LIBLINUX_ELF: &[u8] = include_bytes!("../../../liblinux/target/aarch64-unknown-none/release/liblinux");
+#[cfg(target_arch = "riscv64")]
+const LIBLINUX_ELF: &[u8] = include_bytes!("../../../liblinux/target/riscv64gc-unknown-none-elf/release/liblinux");
+#[cfg(target_arch = "loongarch64")]
+const LIBLINUX_ELF: &[u8] = include_bytes!("../../../liblinux/target/loongarch64-unknown-none/release/liblinux");
 
 // ---------------------------------------------------------------------------
 // BootInfo — passed from kernel to liblinux
@@ -126,8 +131,20 @@ pub fn run_init() -> ! {
     // ------------------------------------------------------------------
     // 3. Read and load /bin/bash ELF
     // ------------------------------------------------------------------
-    let fd = fs.open(0, "/bin/bash", OpenFlags::O_RDONLY, 0)
-        .expect("Failed to open /bin/bash");
+    let fd = match fs.open(0, "/bin/bash", OpenFlags::O_RDONLY, 0) {
+        Ok(fd) => {
+            print_uart("open /bin/bash -> fd=");
+            print_uart_hex(fd as u64);
+            print_uart("\n");
+            fd
+        }
+        Err(e) => {
+            print_uart("open /bin/bash FAILED errno=");
+            print_uart_hex(e as i64 as u64);
+            print_uart("\n");
+            panic!("open /bin/bash failed");
+        }
+    };
     let stat = fs.fstat(0, fd).expect("Failed to stat /bin/bash");
     print_uart("/bin/bash size: ");
     print_uart_hex(stat.size);
@@ -158,7 +175,7 @@ pub fn run_init() -> ! {
     // 5. Write BootInfo for liblinux via physical address
     //    (the isolated PT holds the mapping, not the current shared PT)
     // ------------------------------------------------------------------
-    use aarch64::base::mm::VirtAddr;
+    use crate::arch::base::mm::VirtAddr;
 
     let mut bootinfo = BootInfo {
         program_entry: user_elf.entry as u64,
@@ -181,7 +198,7 @@ pub fn run_init() -> ! {
     unsafe {
         core::ptr::write_volatile(boot_pa as *mut BootInfo, bootinfo);
     }
-    unsafe { asm!("dsb ishst"); }
+    crate::arch::base::cpu::memory_barrier();
 
     // Verify by reading back through the physical address
     let verify = unsafe { core::ptr::read_volatile(boot_pa as *const BootInfo) };
@@ -210,7 +227,7 @@ pub fn run_init() -> ! {
 
     // Flush TLB so the isolated AS is ready
     unsafe {
-        asm!("dsb ish; tlbi vmalle1is; dsb ish; isb");
+        crate::arch::base::cpu::tlb_flush_all();
     }
     print_uart("TLB done\n");
 

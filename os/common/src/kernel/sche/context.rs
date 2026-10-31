@@ -28,7 +28,7 @@
 
 use super::queue;
 use super::thread::{self, ThreadId, ThreadState};
-use aarch64::base::switch::__switch;
+use crate::arch::base::switch::__switch;
 use spin::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -181,8 +181,7 @@ pub fn schedule() {
 
     // Validate current sp is within current thread's kernel stack
     {
-        let sp: usize;
-        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
+        let sp = crate::arch::base::cpu::get_sp();
         if !current_tid.is_null() && cur_base != 0 && (sp < cur_base || sp >= cur_base + cur_ks_size) {
             crate::print_uart("\n*** PANIC: sp outside current kernel stack! ***\n");
             crate::print_uart("[VALIDATE] sp=");
@@ -219,8 +218,7 @@ pub fn schedule() {
     // DBG: SP after resume — validate for ALL threads
     {
         let tid = current_thread();
-        let sp: usize;
-        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
+        let sp = crate::arch::base::cpu::get_sp();
         if tid.0 & 0xFFFF <= 3 {
             // crate::print_uart("[SW:back] tid=");
             // crate::print_uart_hex(tid.0 as u64);

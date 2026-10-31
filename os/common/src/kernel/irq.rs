@@ -17,7 +17,7 @@
 //! extracts the nid under the lock, then releases it before signalling.
 
 use crate::kernel::ipc::notification::{create_notification, signal_notification, NotificationId};
-use aarch64::base::gic;
+use crate::arch::base::gic;
 use spin::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ pub fn dispatch_irq() {
 
     // Timer PPI — handle inline (not GIC-routed; uses system registers)
     if irq_num == 30 {
-        aarch64::base::timer::set_next_trigger();
+        crate::arch::base::timer::set_next_trigger();
         crate::kernel::timer::check_timeouts();
         crate::kernel::sche::schedule();
         return;

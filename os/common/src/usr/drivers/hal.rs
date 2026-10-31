@@ -6,7 +6,7 @@
 
 use virtio_drivers::{Hal, PhysAddr, BufferDirection};
 use core::ptr::NonNull;
-use aarch64::base::mm::{alloc_page, free_page};
+use crate::arch::base::mm::{alloc_page, free_page};
 
 pub struct QuackHal;
 

@@ -24,16 +24,16 @@
 //! The user-space mm server then decides what to do and calls back into
 //! the kernel via `map` / `unmap` / `grant` syscalls.
 
-use aarch64::base::mm::page_table::PageTable;
-use aarch64::base::mm::page_table::{tlb_invalidate, tlb_invalidate_addr};
-use aarch64::base::mm::page_table::PTEFlags;
-use aarch64::base::mm::page_table::PageTableEntry;
-use aarch64::base::mm::VirtAddr;
-use aarch64::base::mm::VirtPageNum;
-use aarch64::base::mm::PhysAddr;
-use aarch64::base::mm::PhysPageNum;
-use aarch64::base::mm::{alloc_page, free_page};
-use aarch64::base::config::PAGE_SIZE;
+use crate::arch::base::mm::page_table::PageTable;
+use crate::arch::base::mm::page_table::{tlb_invalidate, tlb_invalidate_addr};
+use crate::arch::base::mm::page_table::PTEFlags;
+use crate::arch::base::mm::page_table::PageTableEntry;
+use crate::arch::base::mm::VirtAddr;
+use crate::arch::base::mm::VirtPageNum;
+use crate::arch::base::mm::PhysAddr;
+use crate::arch::base::mm::PhysPageNum;
+use crate::arch::base::mm::{alloc_page, free_page};
+use crate::arch::base::config::PAGE_SIZE;
 use spin::Mutex;
 
 use crate::kernel::trap::PageFaultCause;
@@ -690,7 +690,7 @@ pub fn check_all_as_overlap(range_start: usize, range_end: usize) {
         let pt = &entry.page_table;
 
         // Check L0 root
-        let l0_pa = aarch64::base::mm::PhysAddr::from(pt.root_ppn).0;
+        let l0_pa = crate::arch::base::mm::PhysAddr::from(pt.root_ppn).0;
         if l0_pa >= range_start && l0_pa + 4096 <= range_end {
             crate::print_uart("[OVERLAP] L0 root asid=");
             crate::print_uart_hex(entry.id.0 as u64);

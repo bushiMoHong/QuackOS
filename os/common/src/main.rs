@@ -9,10 +9,14 @@ use linked_list_allocator::LockedHeap;
 
 use kernel::trap;
 
+pub mod arch;
 pub mod kernel;
 pub mod usr;
 
+#[cfg(target_arch = "aarch64")]
 global_asm!(include_str!("boot_arm64.S"));
+#[cfg(target_arch = "riscv64")]
+global_asm!(include_str!("boot_riscv64.S"));
 
 // ---------------------------------------------------------------------------
 // Kernel heap — 256 KB static array
@@ -24,7 +28,10 @@ static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
+#[cfg(target_arch = "aarch64")]
 const UART0_DR: *mut u8 = 0x09000000 as *mut u8;
+#[cfg(target_arch = "riscv64")]
+const UART0_DR: *mut u8 = 0x10000000 as *mut u8;
 
 pub fn print_uart(s: &str) {
     for byte in s.bytes() {
@@ -97,6 +104,7 @@ pub(crate) static KERNEL_L2_LOW_PA: spin::Mutex<usize> = spin::Mutex::new(0);
 ///
 /// After this call, virtual addresses == physical addresses for all kernel
 /// memory (identity mapped). User pages go into L0[0]→L1[0]'s unused L2 space.
+#[cfg(target_arch = "aarch64")]
 fn setup_mmu() {
     use core::arch::asm;
 
@@ -208,6 +216,79 @@ fn setup_mmu() {
     print_uart("MU enabled\n");
 }
 
+/// RISC-V Sv39 页表初始化：建立恒等映射（virt == phys），使能 MMU。
+///
+/// QEMU virt 平台布局：
+///   - RAM:   0x8000_0000（512MB，内核被 OpenSBI 加载到 0x8020_0000）
+///   - PLIC:  0x0C00_0000
+///   - UART:  0x1000_0000 / virtio: 0x1000_1000
+///
+/// Sv39 三级页表：root(VPN[2]) → mid(VPN[1], 2MB 超级页) → leaf(VPN[0], 4KB)
+#[cfg(target_arch = "riscv64")]
+fn setup_mmu() {
+    use core::arch::asm;
+
+    // Sv39 PTE 标志
+    const V: u64 = 1 << 0;
+    const R: u64 = 1 << 1;
+    const W: u64 = 1 << 2;
+    const X: u64 = 1 << 3;
+    const A: u64 = 1 << 6;
+    const D: u64 = 1 << 7;
+
+    // 非叶子（指向下一级）：V=1, R=W=X=0
+    const fn table_pte(next_ppn: u64) -> u64 {
+        (next_ppn << 10) | V
+    }
+    // 叶子 2MB 超级页（RAM：RWX；MMIO：RW 不执行）
+    const fn leaf_pte(ppn: u64, exec: bool) -> u64 {
+        let mut p = (ppn << 10) | V | R | W | A | D;
+        if exec {
+            p |= X;
+        }
+        p
+    }
+
+    #[repr(align(4096))]
+    struct PageTablePage([u64; 512]);
+
+    static mut ROOT: PageTablePage = PageTablePage([0u64; 512]);
+    static mut MID_MMIO: PageTablePage = PageTablePage([0u64; 512]); // VPN[2]=0, VA 0x0-0x4000_0000
+    static mut MID_RAM: PageTablePage = PageTablePage([0u64; 512]); // VPN[2]=2, VA 0x8000_0000-0xC000_0000
+
+    let root = unsafe { &raw mut ROOT.0 as *mut u64 };
+    let mid_mmio = unsafe { &raw mut MID_MMIO.0 as *mut u64 };
+    let mid_ram = unsafe { &raw mut MID_RAM.0 as *mut u64 };
+
+    unsafe {
+        // root[0] → mid_mmio（VA 0x0-0x4000_0000）
+        root.add(0).write_volatile(table_pte((mid_mmio as usize >> 12) as u64));
+        // root[2] → mid_ram（VA 0x8000_0000-0xC000_0000）
+        root.add(2).write_volatile(table_pte((mid_ram as usize >> 12) as u64));
+
+        // MMIO 设备内存（2MB 超级页，不执行）
+        mid_mmio.add(0x60).write_volatile(leaf_pte(0x0C00_0000 >> 12, false)); // PLIC
+        mid_mmio.add(0x80).write_volatile(leaf_pte(0x1000_0000 >> 12, false)); // UART + virtio
+
+        // RAM 512MB（0x8000_0000-0xA000_0000，256 × 2MB 超级页，可执行）
+        for i in 0..256u64 {
+            let paddr = 0x8000_0000u64 + i * 0x20_0000u64;
+            mid_ram.add(i as usize).write_volatile(leaf_pte(paddr >> 12, true));
+        }
+    }
+
+    // 保存根页表 PA（供用户映射代码使用）
+    *KERNEL_L0_PA.lock() = root as usize;
+    *KERNEL_L2_LOW_PA.lock() = mid_mmio as usize;
+
+    // 设置 satp = MODE(Sv39=8) | root_ppn，刷新 TLB
+    let satp = (8usize << 60) | (root as usize >> 12);
+    unsafe {
+        asm!("csrw satp, {}", in(reg) satp);
+        asm!("sfence.vma x0, x0");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -219,7 +300,10 @@ pub extern "C" fn rust_main() -> ! {
         ALLOCATOR.lock().init(HEAP.as_mut_ptr(), HEAP_SIZE);
     }
 
+    #[cfg(target_arch = "aarch64")]
     print_uart("Hello, QuackOS on QEMU ARM!\n");
+    #[cfg(target_arch = "riscv64")]
+    print_uart("Hello, QuackOS on QEMU RISC-V!\n");
 
     // 2. Initialise the trap subsystem.
     unsafe {
@@ -231,10 +315,13 @@ pub extern "C" fn rust_main() -> ! {
     let bss_end = unsafe { &__bss_end as *const u8 as usize };
     // Align up to 2MB boundary for safety, then free up to 512MB mark.
     let free_start = (bss_end + 0x1FFFFF) & !0x1FFFFF;
+    #[cfg(target_arch = "aarch64")]
     let ram_end = 0x40000000 + 512 * 1024 * 1024 - 0x100000; // 512MB - 1MB for DTB/QEMU
+    #[cfg(target_arch = "riscv64")]
+    let ram_end = 0x80000000 + 512 * 1024 * 1024 - 0x100000; // 512MB - 1MB for DTB/QEMU
     if free_start < ram_end {
-        aarch64::base::mm::init_page_tracking(free_start);
-        aarch64::base::mm::free_page_range(free_start, ram_end);
+        crate::arch::base::mm::init_page_tracking(free_start);
+        crate::arch::base::mm::free_page_range(free_start, ram_end);
         print_uart("Physical memory registered: ");
         print_uart_hex(free_start as u64);
         print_uart(" - ");

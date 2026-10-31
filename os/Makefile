@@ -8,61 +8,62 @@
 #
 # Targets:
 #   make arm    Build the AArch64 kernel (release) + liblinux
-#   make rv     Build the RISC-V kernel
-#   make la     Build the LoongArch kernel
+#   make rv     Build the RISC-V kernel + liblinux
+#   make la     Build the LoongArch kernel + liblinux
 #   make run    Build and run the selected architecture in QEMU
 #   make clean  Remove build artifacts
 
 ARCH ?= arm
 
-# ---- liblinux user-space binary (AArch64 only) ----
+# ---- liblinux user-space binary ----
 LIBLINUX_DIR  := liblinux
-LIBLINUX_ELF  := $(LIBLINUX_DIR)/target/aarch64-unknown-none/release/liblinux
-AARCH64_BIN   := target/aarch64-unknown-none/release/common
 IMG_FILE      ?= ../image.img
 
 # ---- Per-architecture configuration ----
 ifeq ($(ARCH),arm)
-  KERNEL_BIN := $(AARCH64_BIN)
-  QEMU       := qemu-system-aarch64
-  QEMU_ARGS  := -M virt -cpu cortex-a57 -m 512M -nographic \
-                -drive file=$(IMG_FILE),format=raw,if=none,id=drive0 \
-                -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0
+  TARGET_TRIPLE := aarch64-unknown-none
+  QEMU          := qemu-system-aarch64
+  QEMU_ARGS     := -M virt -cpu cortex-a57 -m 512M -nographic \
+                   -drive file=$(IMG_FILE),format=raw,if=none,id=drive0 \
+                   -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0
 else ifeq ($(ARCH),rv)
-  KERNEL_BIN := arch/riscv64/target/riscv64gc-unknown-none-elf/release/riscv64
-  QEMU       := qemu-system-riscv64
-  QEMU_ARGS  := -M virt -m 512M -nographic
+  TARGET_TRIPLE := riscv64gc-unknown-none-elf
+  QEMU          := qemu-system-riscv64
+  QEMU_ARGS     := -M virt -m 512M -nographic
 else ifeq ($(ARCH),la)
-  KERNEL_BIN := arch/loongarch64/target/loongarch64-unknown-none/release/loongarch64
-  QEMU       := qemu-system-loongarch64
-  QEMU_ARGS  := -M virt -m 512M -nographic
+  TARGET_TRIPLE := loongarch64-unknown-none
+  QEMU          := qemu-system-loongarch64
+  QEMU_ARGS     := -M virt -m 512M -nographic
 else
   $(error Unknown ARCH=$(ARCH): use arm, rv or la)
 endif
+
+LIBLINUX_ELF := $(LIBLINUX_DIR)/target/$(TARGET_TRIPLE)/release/liblinux
+KERNEL_BIN   := target/$(TARGET_TRIPLE)/release/common
 
 # ---- Default ----
 .PHONY: all
 all: $(ARCH)
 
-# ---- Build: AArch64 (kernel + liblinux) ----
-.PHONY: arm
-arm: $(LIBLINUX_ELF)
-	cargo build --target aarch64-unknown-none --release
-
-# liblinux is embedded into the kernel, so always rebuild it.
+# ---- Build: 编译 liblinux（用户态 ELF） ----
 .PHONY: _build_liblinux
+_build_liblinux:
+	cd $(LIBLINUX_DIR) && cargo build --target $(TARGET_TRIPLE) --release
+
 $(LIBLINUX_ELF): _build_liblinux
-	cd $(LIBLINUX_DIR) && cargo build --target aarch64-unknown-none --release
 
-# ---- Build: RISC-V (standalone) ----
-.PHONY: rv
+# ---- Build: 编译完整内核（common） ----
+# 每个 target 通过递归 make 把自身名字作为 ARCH 传入，保证 TARGET_TRIPLE 正确。
+.PHONY: arm rv la _build
+arm:
+	@$(MAKE) --no-print-directory _build ARCH=arm
 rv:
-	cd arch/riscv64 && cargo build --release
-
-# ---- Build: LoongArch (standalone) ----
-.PHONY: la
+	@$(MAKE) --no-print-directory _build ARCH=rv
 la:
-	cd arch/loongarch64 && cargo build --release
+	@$(MAKE) --no-print-directory _build ARCH=la
+
+_build: $(LIBLINUX_ELF)
+	cargo build -p common --target $(TARGET_TRIPLE) --release
 
 # ---- Run ----
 .PHONY: run

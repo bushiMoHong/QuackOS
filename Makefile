@@ -36,9 +36,16 @@ arm rv la:
 # Disk image
 # ---------------------------------------------------------------------------
 
+ARCH_BIN_DIR = $(BIN_DIR)/$(ARCH)/bin
+
 .PHONY: image
 image:
-	@echo "==> Creating $(SIZE_MB)MB disk image..."
+	@if [ ! -d "$(ARCH_BIN_DIR)" ]; then \
+		echo "ERROR: $(ARCH_BIN_DIR) not found (ARCH=$(ARCH))"; \
+		echo "       Available: $$(ls -1 $(BIN_DIR) 2>/dev/null || echo none)"; \
+		exit 1; \
+	fi
+	@echo "==> Creating $(SIZE_MB)MB disk image for ARCH=$(ARCH)..."
 	dd if=/dev/zero of=$(IMG) bs=1M count=$(SIZE_MB) status=progress
 	mkfs.ext4 -F $(IMG)
 	@echo "==> Mounting image..."
@@ -46,13 +53,13 @@ image:
 	sudo mount -o loop $(IMG) mnt
 	sudo mkdir -p mnt/bin
 	sudo mkdir -p mnt/tmp
-	@echo "==> Copying $(BIN_DIR)/* → $(IMG):/bin/"
-	sudo cp -a $(BIN_DIR)/* mnt/bin/
-	sudo chmod 755 mnt/bin/*
+	@echo "==> Copying $(ARCH_BIN_DIR)/* → $(IMG):/bin/"
+	sudo cp -a $(ARCH_BIN_DIR)/* mnt/bin/
+	sudo find mnt/bin -type f -exec chmod 755 {} \;
 	@echo "==> Unmounting..."
 	sudo umount mnt
 	@rmdir mnt
-	@echo "==> $(IMG) ready ($(SIZE_MB)MB, ext4)"
+	@echo "==> $(IMG) ready ($(SIZE_MB)MB, ext4, ARCH=$(ARCH))"
 
 # ---------------------------------------------------------------------------
 # Run

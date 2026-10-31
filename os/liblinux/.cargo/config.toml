@@ -3,3 +3,6 @@ target = "aarch64-unknown-none"
 
 [target.aarch64-unknown-none]
 rustflags = ["-C", "link-arg=-Tlinker.ld"]
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = ["-C", "link-arg=-Tlinker.ld", "-C", "target-feature=+m"]

@@ -1,40 +1,28 @@
-/* 内存布局 */
-use spin::Mutex;
+// config.rs
+// RISC-V Sv39 内存布局：4KB 页，3 级页表，39 位虚拟地址
+// （256 GB 用户空间 + 256 GB 内核空间）
 
-pub const KERNEL_HEAP_SIZE: usize = 0x800_0000;
-pub const PAGE_SIZE: usize = 0x1000; // 4KB
-pub const KERNEL_BASE: usize = 0xffff_ffc0_0000_0000;
-#[allow(unused)]
-pub const USER_MAX: usize = 0x0000_003f_ffff_ffff;
-/// KERNEL_BASE >> 12
-pub const KERNEL_DIRECT_OFFSET: usize = KERNEL_BASE >> 12;
-pub const PAGE_SIZE_BITS: usize = 0xc;
-/// 用户栈大小: 两页
-pub const USER_STACK_SIZE: usize = PAGE_SIZE << 7;
+use core::usize;
 
-// 文件映射和匿名映射区域, 大小为1GB
-pub const MMAP_MIN_ADDR: usize = 0x0000_0020_0000_0000;
-#[allow(unused)]
-pub const MMAP_MAX_ADDR: usize = 0x0000_002f_ffff_ffff;
-#[allow(unused)]
-pub const MMAP_AREA_SIZE: usize = MMAP_MAX_ADDR - MMAP_MIN_ADDR;
-// 动态连接器加载偏移量
-pub const DL_INTERP_OFFSET: usize = 0x30_0000_0000;
+// ---- 页和地址位数 ----
+pub const PAGE_SHIFT: usize = 12;
+pub const PAGE_SIZE: usize = 1 << PAGE_SHIFT; // 4 KB
+pub const VA_BITS: usize = 39; // Sv39
 
-/* 系统调用 */
-pub type SysResult<T> = Result<T, usize>;
+// ---- 用户空间 (User Space) ----
+pub const USER_BASE: usize = 0x0000_0000_0000_0000;
+pub const USER_END: usize = 0x0000_003F_FFFF_FFFF; // 256 GB
+pub const USER_SIZE: usize = 256 * 1024 * 1024 * 1024; // 256 GB
 
-// loongarch64中物理地址的最大长度
-#[allow(unused)]
-pub const PALEN: usize = 48;
-// loongarch64中虚拟地址的最大长度
-#[allow(unused)]
-pub const VALEN: usize = 48;
-pub const USER_MAX_VA: usize = 0x0000_003f_ffff_ffff; // 256GB
+// ---- 内核空间 (Kernel Space) ----
+// Sv39 高半区：从 0xFFFF_FFC0_0000_0000 到 0xFFFF_FFFF_FFFF_FFFF
+pub const KERNEL_BASE: usize = 0xFFFF_FFC0_0000_0000;
 
-/* Ext4文件系统 */
-pub const EXT4_MAX_INLINE_DATA: usize = 60;
-pub static DTB_BASE: Mutex<Option<usize>> = Mutex::new(None);
-
-/* 最大核数 */
-pub const MAX_HARTS: usize = 4;
+// ---- 内核线性映射 (Linear Mapping / Direct Mapping) ----
+// 直接映射所有物理内存，virt = phys + PAGE_OFFSET。
+// 本实现采用恒等映射（virt == phys），与 aarch64 保持一致。
+pub const LINEAR_MAPPING_BASE: usize = 0xFFFF_FFC0_0000_0000;
+pub const LINEAR_MAPPING_END: usize = 0xFFFF_FFFF_FFFF_FFFF;
+pub const LINEAR_MAPPING_SIZE: usize = 256 * 1024 * 1024 * 1024; // 256 GB
+// PAGE_OFFSET 通常定义为线性映射的起始地址
+pub const PAGE_OFFSET: usize = LINEAR_MAPPING_BASE;

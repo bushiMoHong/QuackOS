@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 use crate::kernel::sche::ThreadId;
-use aarch64::base::timer;
+use crate::arch::base::timer;
 use spin::Mutex;
 
 // ---------------------------------------------------------------------------

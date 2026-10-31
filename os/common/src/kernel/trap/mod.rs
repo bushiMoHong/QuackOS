@@ -1,6 +1,6 @@
 //! Common trap (exception / interrupt) handling.
 //!
-//! This module sits on top of the architecture-specific `aarch64::base::trap`
+//! This module sits on top of the architecture-specific `crate::arch::base::trap`
 //! module and provides:
 //!
 //! | Item             | Purpose                                         |
@@ -28,14 +28,14 @@ pub use context::{ExceptionKind, ExceptionSource, GeneralRegs, TrapFrame, UserCo
 pub use native::thread_trampoline_addr;
 
 // Re-export arch functions that the kernel layer calls directly
-pub use aarch64::base::trap::{
+pub use crate::arch::base::trap::{
     fiq_disable, fiq_enable, irq_disable, irq_disable_and_store, irq_enable, irq_restore,
     wait_for_interrupt,
 };
-pub use aarch64::base::trap::handler::{
+pub use crate::arch::base::trap::handler::{
     install_default_handler, install_trap_handler, set_trap_fns, TrapHandler,
 };
-pub use aarch64::base::trap::syndrome::{Fault, Syndrome};
+pub use crate::arch::base::trap::syndrome::{Fault, Syndrome};
 
 // ---------------------------------------------------------------------------
 // PageFaultCause
@@ -433,8 +433,8 @@ impl TrapHandler for CommonTrapHandler {
                         uart_puts("\n");
                         // Dump the page-table walk for the faulting VA
                         {
-                            use aarch64::base::mm::page_table::PageTable;
-                            use aarch64::base::mm::VirtPageNum;
+                            use crate::arch::base::mm::page_table::PageTable;
+                            use crate::arch::base::mm::VirtPageNum;
                             let ttbr0 = crate::kernel::sche::with_thread(
                                 crate::kernel::sche::current_thread(), |t| t.ttbr0
                             ).unwrap_or(0);
@@ -560,7 +560,7 @@ impl TrapHandler for CommonTrapHandler {
 /// # Safety
 /// Must be called exactly once per core, before enabling IRQs.
 pub unsafe fn init() {
-    aarch64::base::trap::init();
+    crate::arch::base::trap::init();
 
-    aarch64::base::trap::handler::install_trap_handler::<CommonTrapHandler>();
+    crate::arch::base::trap::handler::install_trap_handler::<CommonTrapHandler>();
 }

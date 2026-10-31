@@ -12,9 +12,9 @@
 //! a process record, and spawns the initial thread.  When `MmServer` is
 //! `None` the loader falls back to direct page-table manipulation.
 
-use aarch64::base::config::PAGE_SIZE;
-use aarch64::base::mm::page_table::PageTable;
-use aarch64::base::mm::{alloc_page, alloc_pages_contig, PhysPageNum, VirtPageNum};
+use crate::arch::base::config::PAGE_SIZE;
+use crate::arch::base::mm::page_table::PageTable;
+use crate::arch::base::mm::{alloc_page, alloc_pages_contig, PhysPageNum, VirtPageNum};
 use core::ptr::write_volatile;
 use xmas_elf::program::Type;
 use xmas_elf::ElfFile;
@@ -450,7 +450,7 @@ pub const KERNEL_STACK_SIZE: usize = 8 * PAGE_SIZE;
 /// Returns the new `ThreadId` on success.
 pub fn spawn_user_thread(entry: usize, stack_top: usize) -> Result<sche::ThreadId, &'static str> {
     // Allocate kernel stack (2 physically contiguous pages, zeroed)
-    let ks_base = aarch64::base::mm::alloc_pages_contig(8)
+    let ks_base = crate::arch::base::mm::alloc_pages_contig(8)
         .ok_or("OOM for kernel stack")?;
     let ks_top = ks_base + KERNEL_STACK_SIZE;
 
@@ -487,16 +487,8 @@ pub fn spawn_user_thread(entry: usize, stack_top: usize) -> Result<sche::ThreadI
 
     // Build TaskContext on the kernel stack
     let tcb_addr = unsafe { sche::tcb_ptr(tid) } as usize;
-    let ttbr1: usize;
-    let ttbr0: usize;
-    unsafe {
-        core::arch::asm!(
-            "mrs {t1}, ttbr1_el1",
-            "mrs {t0}, ttbr0_el1",
-            t1 = out(reg) ttbr1,
-            t0 = out(reg) ttbr0,
-        );
-    }
+    let ttbr1 = crate::arch::base::cpu::get_kernel_page_table_root();
+    let ttbr0 = crate::arch::base::cpu::get_page_table_root();
     unsafe {
         write_volatile((ctx_addr + 0x00) as *mut usize, thread_trampoline_addr());
         write_volatile((ctx_addr + 0x08) as *mut usize, tcb_addr);
@@ -522,7 +514,7 @@ pub fn spawn_user_thread_in_as(
     ttbr0: usize,
     asid: usize,
 ) -> Result<sche::ThreadId, &'static str> {
-    let ks_base = aarch64::base::mm::alloc_pages_contig(8)
+    let ks_base = crate::arch::base::mm::alloc_pages_contig(8)
         .ok_or("OOM for kernel stack")?;
     let ks_top = ks_base + KERNEL_STACK_SIZE;
 
@@ -640,10 +632,7 @@ pub fn spawn_process(
     let loaded = load_elf_bytes(&mut pt, &elf_data)?;
     map_user_stack(&mut pt);
 
-    unsafe {
-        core::arch::asm!("msr ttbr0_el1, {}", in(reg) l0_pa);
-        core::arch::asm!("dsb ish; isb; tlbi vmalle1is; dsb ish; isb");
-    }
+    crate::arch::base::cpu::set_page_table_root(l0_pa);
 
     assert_eq!(loaded.entry, entry, "ELF entry mismatch");
 

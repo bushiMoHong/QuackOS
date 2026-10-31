@@ -34,44 +34,47 @@ const SYS_CSPACE_REVOKE:         u64 = 27;
 const SYS_CSPACE_MOVE:           u64 = 28;
 const SYS_CSPACE_DELETE:         u64 = 29;
 
-/// Issue a native (SVC #1) syscall with up to 4 arguments.
-/// Returns x0.
+/// 发起一次 native syscall（6 个通用参数）。
+///
+/// AArch64 用 `svc #1`（系统调用号在 x8，参数在 x0-x5，返回值在 x0）；
+/// RISC-V 用 `ecall`（系统调用号在 a7=x17，参数在 a0-a5=x10-x15，返回值在 a0=x10）。
 #[inline(always)]
-pub unsafe fn svc1(nr: u64, a0: usize, a1: usize, a2: usize, a3: usize) -> usize {
+unsafe fn do_svc(nr: u64, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> usize {
     let ret: usize;
-    asm!(
-        "svc #1",
-        in("x8") nr,
-        in("x0") a0, in("x1") a1, in("x2") a2, in("x3") a3,
-        lateout("x0") ret,
-    );
-    ret
-}
-
-/// Issue a native (SVC #1) syscall with 5 arguments.
-#[inline(always)]
-pub unsafe fn svc1_5(nr: u64, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize) -> usize {
-    let ret: usize;
-    asm!(
-        "svc #1",
-        in("x8") nr,
-        in("x0") a0, in("x1") a1, in("x2") a2, in("x3") a3, in("x4") a4,
-        lateout("x0") ret,
-    );
-    ret
-}
-
-/// Issue a native (SVC #1) syscall with 6 arguments.
-#[inline(always)]
-pub unsafe fn svc1_6(nr: u64, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> usize {
-    let ret: usize;
+    #[cfg(target_arch = "aarch64")]
     asm!(
         "svc #1",
         in("x8") nr,
         in("x0") a0, in("x1") a1, in("x2") a2, in("x3") a3, in("x4") a4, in("x5") a5,
         lateout("x0") ret,
     );
+    #[cfg(target_arch = "riscv64")]
+    asm!(
+        "ecall",
+        in("x17") nr,
+        in("x10") a0, in("x11") a1, in("x12") a2, in("x13") a3, in("x14") a4, in("x15") a5,
+        lateout("x10") ret,
+    );
     ret
+}
+
+/// Issue a native (SVC #1) syscall with up to 4 arguments.
+/// Returns x0.
+#[inline(always)]
+pub unsafe fn svc1(nr: u64, a0: usize, a1: usize, a2: usize, a3: usize) -> usize {
+    do_svc(nr, a0, a1, a2, a3, 0, 0)
+}
+
+/// Issue a native (SVC #1) syscall with 5 arguments.
+#[inline(always)]
+pub unsafe fn svc1_5(nr: u64, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize) -> usize {
+    do_svc(nr, a0, a1, a2, a3, a4, 0)
+}
+
+/// Issue a native (SVC #1) syscall with 6 arguments.
+#[inline(always)]
+pub unsafe fn svc1_6(nr: u64, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> usize {
+    do_svc(nr, a0, a1, a2, a3, a4, a5)
 }
 
 // ---------------------------------------------------------------------------
@@ -108,24 +111,8 @@ pub unsafe fn exit_thread(code: usize) -> ! {
 }
 
 pub unsafe fn register_linux_handler(handler_pc: usize, save_area: usize) -> isize {
-    // Explicitly set x0, x1, x8 inside the asm to eliminate any register-
-    // allocation uncertainty.  The ARM64 calling convention gives us
-    // handler_pc in x0 and save_area in x1 on entry to this function,
-    // but when the compiler inlines this into _start the values may be
-    // computed into arbitrary registers.  By doing the moves explicitly
-    // right before SVC we guarantee the kernel sees the right values.
-    let ret: usize;
-    asm!(
-        "mov x0, {h}",
-        "mov x1, {s}",
-        "mov x8, {n}",
-        "svc #1",
-        h = in(reg) handler_pc,
-        s = in(reg) save_area,
-        n = in(reg) SYS_REGISTER_LINUX_HANDLER,
-        lateout("x0") ret,
-    );
-    ret as isize
+    // do_svc 的 in 约束强制把值放进对应寄存器，保证内核看到正确的值。
+    do_svc(SYS_REGISTER_LINUX_HANDLER, handler_pc, save_area, 0, 0, 0, 0) as isize
 }
 
 pub unsafe fn linux_syscall_done(ret_val: usize) -> ! {
@@ -169,11 +156,19 @@ pub unsafe fn exec(elf_ptr: usize, elf_len: usize, stack_top: usize, bootinfo_pt
 pub unsafe fn wait4() -> (isize, usize) {
     let x0: usize;
     let x1: usize;
+    #[cfg(target_arch = "aarch64")]
     core::arch::asm!(
         "svc #1",
         in("x8") SYS_WAIT4,
         out("x0") x0,
         out("x1") x1,
+    );
+    #[cfg(target_arch = "riscv64")]
+    core::arch::asm!(
+        "ecall",
+        in("x17") SYS_WAIT4,
+        out("x10") x0,
+        out("x11") x1,
     );
     (x0 as isize, x1)
 }

@@ -13,7 +13,13 @@ SECTIONS
 
     .rodata : { *(.rodata .rodata.*) }
     .data : { *(.data .data.*) }
-    .bss : { *(.bss .bss.*) }
+
+    .bss : ALIGN(4096) {
+        __bss_start = .;
+        *(.bss .bss.*)
+        *(.bss.stack)
+        __bss_end = .;
+    }
 
     /DISCARD/ : { *(.comment) *(.gnu*) *(.note*) *(.eh_frame*) }
 }

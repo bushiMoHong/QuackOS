@@ -1,263 +1,68 @@
-use core::arch::global_asm;
+//! RISC-V trap（异常 / 中断）处理模块。接口与 aarch64 crate 一致。
 
-pub use context::TrapContext;
-use riscv::register::{
-    satp,
-    scause::{self, Exception, Interrupt, Trap},
-    sepc, sie,
-    sstatus::{self, SPP},
-    stval, stvec::{self, TrapMode},
-};
-
-use crate::{
-    arch::mm::PageTable,
-    fs::{dentry::clean_dentry_cache, proc::interrupts::record_interrupt},
-    mm::VirtAddr,
-    signal::{handle_signal, SiField, SigInfo},
-    syscall::syscall,
-    task::{current_task, handle_timeout, yield_current_task},
-};
-
-use super::timer::set_next_trigger;
-
+pub mod consts;
 pub mod context;
-mod irq;
+pub mod handler;
+pub mod regs;
+pub mod syndrome;
 
+pub use context::{ExceptionKind, ExceptionSource, GeneralRegs, TrapFrame, UserContext};
+pub use handler::TrapHandler;
+pub use syndrome::{Fault, Syndrome};
+
+use core::arch::global_asm;
 global_asm!(include_str!("trap.S"));
 
-extern "C" {
-    fn __trap_from_user();
-    fn __trap_from_kernel();
-    pub fn __return_to_user() -> !;
+// ---------------------------------------------------------------------------
+// Initialisation
+// ---------------------------------------------------------------------------
+
+/// 初始化异常向量表（写 stvec）并初始化 PLIC。
+pub unsafe fn init() {
+    extern "C" {
+        fn __trap_from_user();
+    }
+    // 写入 stvec（低 2 位为 0 表示 direct 模式）
+    core::arch::asm!("csrw stvec, {}", in(reg) __trap_from_user as *const () as usize);
+
+    crate::base::gic::gic_init();
 }
 
-/// initialize CSR `stvec` as the entry of `__alltraps`
-/// Tomodify: 先设置为trap_handler, 这样有page fault debug信息
-#[cfg(target_arch = "riscv64")]
-pub fn init() {
-    let mut sstatus = sstatus::read();
-    sstatus.set_spp(SPP::Supervisor);
-    unsafe {
-        stvec::write(__trap_from_kernel as usize, TrapMode::Direct);
-    }
+// ---------------------------------------------------------------------------
+// Interrupt control
+// ---------------------------------------------------------------------------
+
+#[inline]
+pub unsafe fn irq_enable() {
+    regs::irq_enable();
 }
 
-/// timer interrupt enabled
-#[cfg(target_arch = "riscv64")]
-pub fn enable_timer_interrupt() {
-    unsafe {
-        sie::set_stimer();
-    }
+#[inline]
+pub unsafe fn irq_disable() {
+    regs::irq_disable();
 }
 
-#[derive(PartialEq)]
-pub enum PageFaultCause {
-    LOAD,
-    STORE,
-    EXEC,
+#[inline]
+pub unsafe fn fiq_enable() {
+    regs::fiq_enable();
 }
 
-impl From<scause::Trap> for PageFaultCause {
-    fn from(e: scause::Trap) -> Self {
-        match e {
-            Trap::Exception(Exception::LoadPageFault) => PageFaultCause::LOAD,
-            Trap::Exception(Exception::StorePageFault) => PageFaultCause::STORE,
-            Trap::Exception(Exception::InstructionPageFault) => PageFaultCause::EXEC,
-            _ => unreachable!(),
-        }
-    }
+#[inline]
+pub unsafe fn fiq_disable() {
+    regs::fiq_disable();
 }
 
-#[no_mangle]
-/// handle an interrupt, exception, or system call from user space
-pub fn trap_handler(cx: &mut TrapContext) {
-    let scause = scause::read(); // get trap cause
-    let stval = stval::read(); // get extra value
-    current_task().time_stat().record_ecall();
-    match scause.cause() {
-        Trap::Exception(Exception::UserEnvCall) => {
-            cx.sepc += 4;
-            // cx.x[10] = syscall(
-            //     cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15], cx.x[16], cx.x[17],
-            // ). as usize;
-            cx.x[10] = match syscall(
-                cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15], cx.x[16], cx.x[17],
-            ) {
-                Ok(ret) => ret as usize,
-                Err(e) => {
-                    // 在开发阶段, 如果发生了EFAULT, 直接panic
-                    // if e == Errno::EFAULT {
-                    //     panic!("EFAULT in syscall");
-                    // }
-                    log::error!("syscall error: {:?}", e);
-                    e as usize
-                }
-            }
-        }
-        Trap::Exception(Exception::InstructionFault) => {
-            let satp = satp::read().bits();
-            let page_table = PageTable::from_token(satp);
-            page_table.dump_all_user_mapping();
-            log::error!("Instruction fault at {:#x}", stval);
-            let pte = page_table.find_pte(VirtAddr::from(stval).floor()).unwrap();
-            log::error!("pte: {:?}", pte);
-            // page fault exit code
-            panic!(
-                "Instruction fault in application, bad addr = {:#x}, scause = {:?}, sepc = {:#x}",
-                stval,
-                scause.cause(),
-                sepc::read()
-            );
-        }
-        Trap::Exception(Exception::LoadPageFault)
-        | Trap::Exception(Exception::StorePageFault)
-        | Trap::Exception(Exception::InstructionPageFault) => {
-            // stval is the faulting virtual address
-            // recoverable page fault:
-            // 1. fork COW area
-            // 2. lazy allocation
-            let va = VirtAddr::from(stval);
-            let casue = PageFaultCause::from(scause.cause());
-            log::debug!(
-                "page fault cause {:?}, bad_addr = {:#x}, sepc = {:#x}",
-                scause.cause(),
-                stval,
-                sepc::read()
-            );
-            let task = current_task();
-            task.op_memory_set_mut(|memory_set| {
-                if let Err(sig) = memory_set.handle_recoverable_page_fault(va, casue) {
-                    // 8.20 tmp commit
-                    // memory_set.page_table.dump_all_user_mapping();
-                    // dump_trap_context(&current_task());
-                    // panic!(
-                    log::error!(
-                        "Unrecoverble page fault in application, bad addr = {:#x}, scause = {:?}, sepc = {:#x}",
-                        stval,
-                        scause.cause(),
-                        sepc::read()
-                    );
-                    task.receive_siginfo(
-                        SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::NULL),
-                        false,
-                    );
-                }
-            })
-            // we should jump back to the faulting instruction after handling the page fault
-        }
-        Trap::Exception(Exception::LoadFault) | Trap::Exception(Exception::StoreFault) => {
-            panic!(
-                    "Unrecoverble page fault in application, bad addr = {:#x}, scause = {:?}, sepc = {:#x}",
-                    stval,
-                    scause.cause(),
-                    sepc::read()
-                );
-        }
-        Trap::Exception(Exception::Breakpoint) => {
-            // panic!("Breakpoint at 0x{:x}", cx.sepc);
-            cx.sepc += 4; // 跳过断点
-        }
-        Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            record_interrupt(Interrupt::SupervisorTimer as usize);
-            set_next_trigger();
-            handle_timeout();
-            clean_dentry_cache();
-            yield_current_task();
-        }
-        _ => {
-            let current_task = crate::task::current_task();
-            log::error!("task {} trap", current_task.tid());
-            if scause.is_interrupt() {
-                record_interrupt(Interrupt::from(scause.code()) as usize);
-            }
-            panic!(
-                "Unsupported trap {:?}, stval = {:#x}, sepc = {:#x}!",
-                scause.cause(),
-                stval,
-                sepc::read()
-            );
-        }
-    }
-    handle_signal();
-    #[cfg(feature = "cfs")]
-    {
-        use crate::sched::check_slice;
-        check_slice();
-    }
-    current_task().time_stat().record_sret();
-    return;
+#[inline]
+pub fn irq_disable_and_store() -> u64 {
+    regs::irq_disable_and_store()
 }
 
-#[no_mangle]
-pub fn kernel_trap_handler(cx: &mut TrapContext) {
-    log::warn!("[kernel_trap_handler]");
-    let scause = scause::read();
-    let stval = stval::read();
-    match scause.cause() {
-        Trap::Exception(Exception::Breakpoint) => {
-            log::info!("Breakpoint at 0x{:x}", cx.sepc);
-            cx.sepc += 2;
-        }
-        Trap::Exception(Exception::IllegalInstruction) => {
-            log::error!("IllegalInstruction at 0x{:x}", cx.sepc);
-            panic!("IllegalInstruction");
-        }
-        Trap::Exception(Exception::LoadPageFault) | Trap::Exception(Exception::StorePageFault) => {
-            // stval is the faulting virtual address
-            // recoverable page fault:
-            // 1. fork COW area
-            // 2. lazy allocation
-            let va = VirtAddr::from(stval);
-            let casue = PageFaultCause::from(scause.cause());
-            log::error!(
-                "page fault cause {:?}, bad_addr = {:#x}, sepc = {:#x}",
-                scause.cause(),
-                stval,
-                sepc::read()
-            );
-            let task = current_task();
-            task.op_memory_set_mut(|memory_set| {
-                if let Err(sig) = memory_set.handle_recoverable_page_fault(va, casue) {
-                    memory_set.page_table.dump_all_user_mapping();
-                    // dump_trap_context(&current_task());
-                    // panic!(
-                    // 8.20 tmp panic
-                    // log::error!(
-                    panic!(
-                        "Unrecoverble page fault in application, bad addr = {:#x}, scause = {:?}, sepc = {:#x}",
-                        stval,
-                        scause.cause(),
-                        sepc::read()
-                    );
-                    task.receive_siginfo(
-                        SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::NULL),
-                        false,
-                    );
-                }
-            })
-            // we should jump back to the faulting instruction after handling the page fault
-        }
-        Trap::Exception(Exception::InstructionPageFault) => {
-            panic!(
-                "Instruction page fault at 0x{:x}, badaddr = {:#x}",
-                cx.sepc,
-                stval::read()
-            );
-        }
-        Trap::Exception(Exception::UserEnvCall) => {
-            panic!("UserEnvCall from kernel!");
-        }
-        Trap::Interrupt(Interrupt::SupervisorTimer) => {
-            panic!("SupervisorTimer in kernel mode")
-        }
-        _ => {
-            panic!(
-                "Unsupported trap {:?}, stval = {:#x}, sepc = {:#x}!",
-                scause.cause(),
-                stval::read(),
-                sepc::read()
-            );
-        }
-    }
-    // return to the next instruction
+#[inline]
+pub unsafe fn irq_restore(flags: u64) {
+    regs::daif_restore(flags);
+}
+
+#[inline]
+pub fn wait_for_interrupt() {
+    regs::wfe();
 }

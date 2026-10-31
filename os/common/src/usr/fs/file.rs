@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use spin::RwLock;
 
 use super::dentry::Dentry;
-use super::types::{OpenFlags, SeekWhence};
+use super::types::{OpenFlags, SeekWhence, Errno};
 
 /// An open file — holds a reference to the dentry, a cursor position,
 /// and the open flags.
@@ -23,43 +23,64 @@ impl File {
         }
     }
 
-    pub fn read(&self, buf: &mut [u8]) -> usize {
-        if let Some(ref inode) = *self.dentry.inode.read() {
-            let pos = *self.pos.read();
-            let n = inode.read(pos, buf);
-            *self.pos.write() += n;
-            n
-        } else {
-            0
+    pub fn open(dentry: Arc<Dentry>, flags: OpenFlags) -> Result<Self, Errno> {
+        if dentry.is_negative() {
+            return Err(Errno::ENOENT);
         }
+        if dentry.inode.read().is_none() {
+            return Err(Errno::EIO);
+        }
+        Ok(Self { dentry, pos: RwLock::new(0), flags })
     }
 
-    pub fn write(&self, buf: &[u8]) -> usize {
-        if let Some(ref inode) = *self.dentry.inode.read() {
-            let pos = *self.pos.read();
-            let n = inode.write(pos, buf);
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        let inode_guard = self.dentry.inode.read();
+        let inode = inode_guard.as_ref().ok_or(Errno::EIO)?;
+        let pos = *self.pos.read();
+        let n = inode.read(pos, buf);
+        if n > 0 {
             *self.pos.write() += n;
-            n
-        } else {
-            0
         }
+        Ok(n)
     }
 
-    pub fn seek(&self, offset: isize, whence: SeekWhence) -> usize {
+    pub fn write(&self, buf: &[u8]) -> Result<usize, Errno> {
+        let inode_guard = self.dentry.inode.read();
+        let inode = inode_guard.as_ref().ok_or(Errno::EIO)?;
+        let pos = *self.pos.read();
+        let n = inode.write(pos, buf);
+        if n > 0 {
+            *self.pos.write() += n;
+        }
+        Ok(n)
+    }
+
+    pub fn seek(&self, offset: isize, whence: SeekWhence) -> Result<usize, Errno> {
         let mut pos = self.pos.write();
-        let size = self
-            .dentry
-            .inode
-            .read()
-            .as_ref()
-            .map(|i| i.get_size())
-            .unwrap_or(0);
-        match whence {
-            SeekWhence::Set => *pos = offset as usize,
-            SeekWhence::Cur => *pos = ((*pos as isize) + offset) as usize,
-            SeekWhence::End => *pos = ((size as isize) + offset) as usize,
+
+        let base: isize = match whence {
+            SeekWhence::Set => 0,
+            SeekWhence::Cur => isize::try_from(*pos).map_err(|_| Errno::EINVAL)?,
+            SeekWhence::End => {
+                let size = self
+                    .dentry
+                    .inode
+                    .read()
+                    .as_ref()
+                    .map(|i| i.get_size())
+                    .unwrap_or(0);
+                isize::try_from(size).map_err(|_| Errno::EINVAL)?
+            }
+        };
+
+        // checked_add: 溢出 → EINVAL；结果 < 0 → EINVAL
+        let new = base.checked_add(offset).ok_or(Errno::EINVAL)?;
+        if new < 0 {
+            return Err(Errno::EINVAL);
         }
-        *pos
+
+        *pos = new as usize;
+        Ok(*pos)
     }
 
     pub fn getdents(&self, buf: &mut [u8]) -> (usize, usize) {

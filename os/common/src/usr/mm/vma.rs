@@ -28,7 +28,7 @@ use crate::usr::mm::types::{MmError, MmResult, VmaEntry, VmPerms, VmRegionType};
 /// the `BTreeMap` migration becomes necessary.
 pub const MAX_VMA_ENTRIES: usize = 64;
 
-/// Page size (bytes).  Matches `aarch64::base::config::PAGE_SIZE`.
+/// Page size (bytes).  Matches `crate::arch::base::config::PAGE_SIZE`.
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_MASK: usize = PAGE_SIZE - 1;
 

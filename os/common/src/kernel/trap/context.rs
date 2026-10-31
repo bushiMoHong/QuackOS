@@ -3,8 +3,8 @@
 //! These come from the `aarch64` library crate.  When additional
 //! architectures are supported they will be selected via `#[cfg]`.
 
-pub use aarch64::base::trap::TrapFrame;
-pub use aarch64::base::trap::ExceptionKind;
-pub use aarch64::base::trap::ExceptionSource;
-pub use aarch64::base::trap::GeneralRegs;
-pub use aarch64::base::trap::UserContext;
+pub use crate::arch::base::trap::TrapFrame;
+pub use crate::arch::base::trap::ExceptionKind;
+pub use crate::arch::base::trap::ExceptionSource;
+pub use crate::arch::base::trap::GeneralRegs;
+pub use crate::arch::base::trap::UserContext;

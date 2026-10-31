@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
-use aarch64::base::config::PAGE_SIZE;
+use crate::arch::base::config::PAGE_SIZE;
 pub const PAGE_SIZE_BITS: usize = 12;
 use crate::usr::fs::dev::block_dev::BlockDevice;
 use crate::usr::fs::inode::InodeOp;

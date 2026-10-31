@@ -301,7 +301,10 @@ pub extern "C" fn _start() -> ! {
         ];
         core::ptr::copy_nonoverlapping(random_bytes.as_ptr(), (sp + 208) as *mut u8, 16);
 
+        #[cfg(target_arch = "aarch64")]
         asm!("dsb ishst");
+        #[cfg(target_arch = "riscv64")]
+        asm!("fence");
     }
 
     // Enter the Linux program with the register state execve() guarantees:
@@ -309,6 +312,7 @@ pub extern "C" fn _start() -> ! {
     // any non-NULL value with atexit — a stale stack pointer here makes
     // exit() branch to the stack and fault.
     unsafe {
+        #[cfg(target_arch = "aarch64")]
         asm!(
             "mov sp, x0",
             "mov x0,  xzr",
@@ -343,6 +347,43 @@ pub extern "C" fn _start() -> ! {
             "mov x30, xzr",
             "br  x16",
             in("x0") sp,
+            in("x16") entry,
+            options(noreturn)
+        );
+        #[cfg(target_arch = "riscv64")]
+        asm!(
+            "mv sp, x10",   // sp = 栈指针（来自 a0）
+            "mv x10, x0",   // a0 = 0（rtld_fini）
+            "mv x11, x0",   // a1 = 0
+            "mv x12, x0",   // a2 = 0
+            "mv x13, x0",   // a3 = 0
+            "mv x14, x0",   // a4 = 0
+            "mv x15, x0",   // a5 = 0
+            "mv x17, x0",   // a7 = 0
+            "mv x1,  x0",   // ra = 0
+            "mv x3,  x0",   // gp = 0
+            "mv x4,  x0",   // tp = 0
+            "mv x5,  x0",   // t0 = 0
+            "mv x6,  x0",   // t1 = 0
+            "mv x7,  x0",   // t2 = 0
+            "mv x8,  x0",   // s0 = 0
+            "mv x9,  x0",   // s1 = 0
+            "mv x18, x0",   // s2 = 0
+            "mv x19, x0",   // s3 = 0
+            "mv x20, x0",   // s4 = 0
+            "mv x21, x0",   // s5 = 0
+            "mv x22, x0",   // s6 = 0
+            "mv x23, x0",   // s7 = 0
+            "mv x24, x0",   // s8 = 0
+            "mv x25, x0",   // s9 = 0
+            "mv x26, x0",   // s10 = 0
+            "mv x27, x0",   // s11 = 0
+            "mv x28, x0",   // t3 = 0
+            "mv x29, x0",   // t4 = 0
+            "mv x30, x0",   // t5 = 0
+            "mv x31, x0",   // t6 = 0
+            "jr x16",       // 跳转到入口
+            in("x10") sp,
             in("x16") entry,
             options(noreturn)
         );

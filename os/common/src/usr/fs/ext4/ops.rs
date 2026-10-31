@@ -64,10 +64,10 @@ impl InodeOp for Ext4Inode {
     fn lookup(&self, name: &str, parent_entry: Arc<Dentry>) -> Arc<Dentry> {
         let mut dentry = Dentry::negative(
             format!("{}/{}", parent_entry.absolute_path, name),
-            Some(Arc::downgrade(&parent_entry)),
+            Some(parent_entry.clone()),
         );
 
-        if let Some(child) = parent_entry.get_child(name) {
+        if let Some(child) = parent_entry.lookup_child(name) {
             return child;
         }
 
@@ -93,7 +93,7 @@ impl InodeOp for Ext4Inode {
 
             dentry = Dentry::new(
                 absolute_path,
-                Some(Arc::downgrade(&parent_entry)),
+                Some(parent_entry.clone()),
                 flags,
                 Some(inode),
             );

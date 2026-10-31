@@ -13,10 +13,24 @@ use super::file::{FdTable, File};
 use super::inode::InodeOp;
 use super::types::{Errno, Kstat, OpenFlags, SeekWhence};
 
+use crate::print_uart;
+use crate::print_uart_hex;
 use crate::kernel::ipc::channel::{ChannelId, with_channel, SendMatch, RecvMatch};
 use crate::kernel::ipc::message::{Message, ShortPayload, ProcessId};
 use crate::kernel::ipc::{deliver, wake, get_ipc_buffer};
 use crate::kernel::sche::{self, block_current, IpcState};
+
+fn dbg_dentry(tag: &str, d: &Dentry) {
+    print_uart("[dbg] ");
+    print_uart(tag);
+    print_uart(" path=");
+    print_uart(&d.absolute_path);
+    print_uart(" neg=");
+    print_uart(if d.is_negative() { "Y" } else { "N" });
+    print_uart(" inode=");
+    print_uart(if d.inode.read().is_some() { "Y" } else { "N" });
+    print_uart("\n");
+}
 
 // ---------------------------------------------------------------------------
 // FS IPC protocol constants (Phase 0)
@@ -140,6 +154,11 @@ pub struct FsServer {
 impl FsServer {
     pub fn new(root_inode: Arc<dyn InodeOp>) -> Self {
         let root = Dentry::new("/".into(), None, DentryFlags::DIRECTORY, Some(root_inode));
+        print_uart("[fs] root dentry created, inode=");
+        print_uart(if root.inode.read().is_some() { "Y" } else { "N" });
+        print_uart(" neg=");
+        print_uart(if root.is_negative() { "Y" } else { "N" });
+        print_uart("\n");
         Self {
             root,
             fd_tables: RwLock::new(BTreeMap::new()),
@@ -158,44 +177,83 @@ impl FsServer {
             .filter(|s| !s.is_empty())
             .collect();
 
+        print_uart("[walk] path=");
+        print_uart(path);
+        print_uart(" comps=");
+        print_uart_hex(components.len() as u64);
+        print_uart("\n");
+
         if components.is_empty() {
             return Ok((root.clone(), root.clone()));
         }
 
         let mut current = root.clone();
         for &name in &components[..components.len() - 1] {
-            let next = if let Some(child) = current.get_child(name) {
+            print_uart("[walk] comp=");
+            print_uart(name);
+            print_uart(" parent_inode=");
+            print_uart(if current.inode.read().is_some() { "Y" } else { "N" });
+            print_uart("\n");
+
+            let next = if let Some(child) = current.lookup_child(name) {
+                print_uart("[walk]   dcache hit\n");
                 child
             } else {
-                let inode_opt = current.inode.read();
-                if let Some(ref inode) = *inode_opt {
-                    let child = inode.lookup(name, current.clone());
-                    current
-                        .children
-                        .write()
-                        .insert(name.into(), Arc::downgrade(&child));
-                    child
-                } else {
-                    return Err(Errno::ENOENT);
+                // 关键：把 inode_opt 的借用限制在块内，避免持锁打印
+                let maybe_child = {
+                    let inode_opt = current.inode.read();
+                    inode_opt
+                        .as_ref()
+                        .map(|inode| inode.lookup(name, current.clone()))
+                };
+                match maybe_child {
+                    Some(child) => {
+                        dbg_dentry("[walk]   lookup", &child);
+                        current
+                            .children
+                            .write()
+                            .insert(name.into(), Arc::downgrade(&child));
+                        child
+                    }
+                    None => {
+                        print_uart("[walk]   parent inode is None -> ENOENT\n");
+                        return Err(Errno::ENOENT);
+                    }
                 }
             };
             current = next;
         }
 
         let last_name = components.last().unwrap();
-        let target = if let Some(child) = current.get_child(last_name) {
+        print_uart("[walk] last=");
+        print_uart(last_name);
+        print_uart(" parent_inode=");
+        print_uart(if current.inode.read().is_some() { "Y" } else { "N" });
+        print_uart("\n");
+
+        let target = if let Some(child) = current.lookup_child(last_name) {
+            print_uart("[walk]   dcache hit\n");
             child
         } else {
-            let inode_opt = current.inode.read();
-            if let Some(ref inode) = *inode_opt {
-                let child = inode.lookup(last_name, current.clone());
-                current
-                    .children
-                    .write()
-                    .insert((*last_name).into(), Arc::downgrade(&child));
-                child
-            } else {
-                return Err(Errno::ENOENT);
+            let maybe_child = {
+                let inode_opt = current.inode.read();
+                inode_opt
+                    .as_ref()
+                    .map(|inode| inode.lookup(last_name, current.clone()))
+            };
+            match maybe_child {
+                Some(child) => {
+                    dbg_dentry("[walk]   lookup", &child);
+                    current
+                        .children
+                        .write()
+                        .insert((*last_name).into(), Arc::downgrade(&child));
+                    child
+                }
+                None => {
+                    print_uart("[walk]   parent inode is None -> ENOENT\n");
+                    return Err(Errno::ENOENT);
+                }
             }
         };
 
@@ -210,16 +268,31 @@ impl FsServer {
         flags: OpenFlags,
         _mode: u16,
     ) -> Result<usize, Errno> {
-        let (dentry, _parent) = Self::path_walk(&self.root, path)?;
+        print_uart("[open] path=");
+        print_uart(path);
+        print_uart("\n");
+
+        let (dentry, _parent) = match Self::path_walk(&self.root, path) {
+            Ok(v) => v,
+            Err(e) => {
+                print_uart("[open] path_walk Err errno=");
+                print_uart_hex(e as i64 as u64);
+                print_uart("\n");
+                return Err(e);
+            }
+        };
+
+        dbg_dentry("[open] result", &dentry);
+
         if dentry.is_negative() && !flags.contains(OpenFlags::O_CREAT) {
+            print_uart("[open] negative dentry + no O_CREAT -> ENOENT\n");
             return Err(Errno::ENOENT);
         }
+
         let file = Arc::new(File::new(dentry, flags));
         let mut tables = self.fd_tables.write();
         let table = tables.entry(pid).or_insert_with(FdTable::new);
-        table
-            .alloc_fd(file)
-            .ok_or(Errno::ENOMEM)
+        table.alloc_fd(file).ok_or(Errno::ENOMEM)
     }
 
     /// Read symlink target. Does NOT follow the last component.
@@ -233,7 +306,7 @@ impl FsServer {
         };
 
         let (parent_dentry, _) = Self::path_walk(&self.root, dir)?;
-        let target = if let Some(child) = parent_dentry.get_child(name) {
+        let target = if let Some(child) = parent_dentry.lookup_child(name) {
             child
         } else {
             let inode_opt = parent_dentry.inode.read();
@@ -262,7 +335,7 @@ impl FsServer {
         let table = tables.get(&pid).ok_or(Errno::EBADF)?;
         let file = table.get_file(fd).ok_or(Errno::EBADF)?;
         let mut buf = vec![0u8; count];
-        let n = file.read(&mut buf);
+        let n = file.read(&mut buf)?;
         buf.truncate(n);
         Ok(buf)
     }
@@ -272,7 +345,7 @@ impl FsServer {
         let tables = self.fd_tables.read();
         let table = tables.get(&pid).ok_or(Errno::EBADF)?;
         let file = table.get_file(fd).ok_or(Errno::EBADF)?;
-        Ok(file.read(buf))
+        Ok(file.read(buf)?)
     }
 
     /// Write to a file descriptor.
@@ -280,7 +353,7 @@ impl FsServer {
         let tables = self.fd_tables.read();
         let table = tables.get(&pid).ok_or(Errno::EBADF)?;
         let file = table.get_file(fd).ok_or(Errno::EBADF)?;
-        Ok(file.write(data))
+        Ok(file.write(data)?)
     }
 
     /// Close a file descriptor.
@@ -299,7 +372,8 @@ impl FsServer {
         let tables = self.fd_tables.read();
         let table = tables.get(&pid).ok_or(Errno::EBADF)?;
         let file = table.get_file(fd).ok_or(Errno::EBADF)?;
-        Ok(file.seek(offset, whence))
+        let new_pos = file.seek(offset, whence)?;
+        Ok(new_pos)
     }
 
     /// Get file metadata by path.
@@ -442,12 +516,18 @@ impl FsServer {
                 if let Some(table) = tables.get(&0) {
                     if let Some(file) = table.get_file(fd) {
                         let mut buf = vec![0u8; count.min(240)]; // 256 - 8 retval - 8 actual_len
-                        let n = file.read(&mut buf);
-                        buf.truncate(n);
-                        resp[0..8].copy_from_slice(&0i64.to_le_bytes());
-                        resp[8..16].copy_from_slice(&(n as u64).to_le_bytes());
-                        let copy_len = n.min(resp.len() - 16);
-                        resp[16..16 + copy_len].copy_from_slice(&buf[..copy_len]);
+                        match file.read(&mut buf) {                    // ← 改这里
+                            Ok(n) => {
+                                buf.truncate(n);
+                                resp[0..8].copy_from_slice(&0i64.to_le_bytes());
+                                resp[8..16].copy_from_slice(&(n as u64).to_le_bytes());
+                                let copy_len = n.min(resp.len() - 16);
+                                resp[16..16 + copy_len].copy_from_slice(&buf[..copy_len]);
+                            }
+                            Err(e) => {
+                                resp[0..8].copy_from_slice(&(-(e as i64)).to_le_bytes());
+                            }
+                        }
                     } else {
                         resp[0..8].copy_from_slice(&(-(Errno::EBADF as i64)).to_le_bytes());
                     }

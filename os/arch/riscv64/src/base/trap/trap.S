@@ -1,157 +1,282 @@
-# sscratch 寄存器 在用户态时保存用户的内核栈指针, 在内核态时保存内核的用户栈指针  
-# 在trap中不需要修改TCB中的sp, 因为在__switch中当前任务的内核栈是根据现在的sp来确定的, 这个sp的值已经减去了TrapContext的大小
-# 但在__swtich中, 需要修改当前TCB中的sp, 因为在__switch中下个任务的内核栈位置是通过TCB中的sp来确定的
-
-# 2025-03-31 更改
-# 由于用户态下会更新tp寄存器的值，因此在-8(sp)的位置保存了内核tp
-# 2025-04-11 更改
-# 由于clone会产生新的子进程，新子进程的tp无法在-8(sp)的位置保存，因此将trap_context更新
-# 注：last-a0保存原先用户传递参数（用于signal处理SA_RESTART），只在__trap_from_user中保存即可，由handle_signal来恢复
+# RISC-V trap 入口。
 #
-#             0  ----------------------
-#             |      ketnal_tp        |
-#             |-----------------------|
-#             |       last-a0         |   
-#             |-----------------------|
-#             |         sepc          |
-#             |-----------------------|
-#             |       sstatus         | 
-#             |-----------------------| 
-#             |       x0 ~ x31        | x[4](tp) 保存用户tp
-#  [sp] -> 36*8 -----------------------
+# TrapFrame 布局（36*8 = 288 字节，与 aarch64 一致）：
+#   offset 0: trap_num = source | (kind << 16)
+#   offset 1: elr     = sepc
+#   offset 2: spsr    = sstatus
+#   offset 3: sp
+#   offset 4: tpidr   = tp
+#   offset 5..34: general.x1..x30
+#   offset 35: general.x0
+#
+# 寄存器映射（general 字段 → RISC-V 寄存器）：
+#   x0→a0, x1→a1, x2→a2, x3→a3, x4→a4, x5→a5, x6→a6, x7→a7,
+#   x8→a7(系统调用号), x9→ra, x10→sp, x11→gp, x12→tp,
+#   x13→t0, x14→t1, x15→t2, x16→s0, x17→s1, x18→s2, x19→s3,
+#   x20→s4, x21→s5, x22→s6, x23→s7, x24→s8, x25→s9, x26→s10,
+#   x27→s11, x28→t3, x29→t4, x30→t5
+#
+# 约定：sscratch 在用户态保存内核栈指针；进入 trap 时交换 sp 与 sscratch。
 
-.altmacro
-.macro SAVE_GP n
-    sd x\n, \n*8(sp)
-.endm
-.macro LOAD_GP n
-    ld x\n, \n*8(sp)
-.endm
     .section .text
     .globl __trap_from_user
-    .globl __return_to_user
     .globl __trap_from_kernel
+    .globl __return_to_user
+    .globl run_user
     .align 2
-# 在trap进入内核态时, 将用户态的上下文保存到内核栈上, 然后调用trap_handler
+
+# ── 用户态 trap 入口 ──────────────────────────────────────────────────────
 __trap_from_user:
-    # 交换sp和sscratch的值
-    csrrw sp, sscratch, sp
-    # 在内核栈上保存用户的上下文 
-    addi sp, sp, -36*8
-    # save general-purpose registers
-    sd x1, 1*8(sp)
-    # skip sp(x2), we will save it later
-    sd x3, 3*8(sp)
-    # 先保存用户tp
-    sd x4, 4*8(sp)
-    # save x5~x31
-    .set n, 5
-    .rept 27
-        SAVE_GP %n
-        .set n, n+1
-    .endr
-    # we can use t0/t1/t2 freely, because they were saved on kernel stack
-    csrr t0, sstatus
-    csrr t1, sepc
-    sd t0, 32*8(sp)
-    sd t1, 33*8(sp)
-    # read user stack from sscratch and save it on the kernel stack
-    csrr t2, sscratch
-    sd t2, 2*8(sp)
-    # 保存用户a0参数到last_a0
-    sd a0, 34*8(sp)
-    # 第一个参数是TrapContext在内核栈上的地址, 通过a0传递
-    mv a0, sp
-    # 从kernel_tp中载入内核tp
-    ld tp, 35*8(sp)
-    # 注意要在保存上下文后设置stvec
-    # 设置stvec为Mode(0~1 bits) Direct, 基地址为__trap_from_kernel
+    csrrw sp, sscratch, sp       # 交换 sp 和 sscratch（sscratch 存内核栈）
+    addi sp, sp, -36*8           # 分配 TrapFrame
+
+    # 保存 sepc / sstatus / 用户 sp / tp
+    csrr t0, sepc
+    csrr t1, sstatus
+    sd t0, 1*8(sp)               # elr = sepc
+    sd t1, 2*8(sp)               # spsr = sstatus
+    csrr t0, sscratch            # 用户 sp 现在在 sscratch
+    sd t0, 3*8(sp)               # TrapFrame.sp = 用户 sp
+    sd tp, 4*8(sp)               # tpidr = tp
+
+    # 保存通用寄存器（见顶部映射表）
+    sd x10, 35*8(sp)             # x0  = a0
+    sd x11, 5*8(sp)              # x1  = a1
+    sd x12, 6*8(sp)              # x2  = a2
+    sd x13, 7*8(sp)              # x3  = a3
+    sd x14, 8*8(sp)              # x4  = a4
+    sd x15, 9*8(sp)              # x5  = a5
+    sd x16, 10*8(sp)             # x6  = a6
+    sd x17, 11*8(sp)             # x7  = a7
+    sd x17, 12*8(sp)             # x8  = a7（系统调用号）
+    sd x1,  13*8(sp)             # x9  = ra
+    sd x2,  14*8(sp)             # x10 = sp
+    sd x3,  15*8(sp)             # x11 = gp
+    sd x4,  16*8(sp)             # x12 = tp
+    sd x5,  17*8(sp)             # x13 = t0
+    sd x6,  18*8(sp)             # x14 = t1
+    sd x7,  19*8(sp)             # x15 = t2
+    sd x8,  20*8(sp)             # x16 = s0
+    sd x9,  21*8(sp)             # x17 = s1
+    sd x18, 22*8(sp)             # x18 = s2
+    sd x19, 23*8(sp)             # x19 = s3
+    sd x20, 24*8(sp)             # x20 = s4
+    sd x21, 25*8(sp)             # x21 = s5
+    sd x22, 26*8(sp)             # x22 = s6
+    sd x23, 27*8(sp)             # x23 = s7
+    sd x24, 28*8(sp)             # x24 = s8
+    sd x25, 29*8(sp)             # x25 = s9
+    sd x26, 30*8(sp)             # x26 = s10
+    sd x27, 31*8(sp)             # x27 = s11
+    sd x28, 32*8(sp)             # x28 = t3
+    sd x29, 33*8(sp)             # x29 = t4
+    sd x30, 34*8(sp)             # x30 = t5
+
+    # 计算 trap_num = source | (kind << 16)，source=2(用户), kind=scause>>63
+    csrr t0, scause
+    srli t0, t0, 63
+    slli t0, t0, 16
+    li   t1, 2
+    or   t0, t0, t1
+    sd   t0, 0*8(sp)
+
+    # 进入内核态，后续 trap 走 __trap_from_kernel
     la t0, __trap_from_kernel
     csrw stvec, t0
-    # 设置sstatus的SPP位为1, 表示进入内核态, 实际并没有作用
-    csrs sstatus, 8
+
+    mv a0, sp
     call trap_handler
     j __return_to_user
 
-# 在trap_handler返回时, 将内核栈上的上下文恢复到用户态, 然后返回到用户态
-# 注意这个`__return_to_user`与TrapContext结构体强相关, 且是硬编码的
-# 预期：进入该函数时sp指向该内核栈的TrapContext的位置
+# ── 返回用户态 ────────────────────────────────────────────────────────────
 __return_to_user:
-    # 设置stvec为Mode(0~1 bits) Direct, 基地址为__trap_from_user
-    # 注意要在恢复上下文之前设置, 因为恢复上下文时会用到stvec
-    la t0, __trap_from_user
-    csrw stvec, t0 
-    # now sp->kernel stack(after allocated)
-    ld t0, 32*8(sp)
-    # `__return_to_user` sstatus/sepc
-    ld t1, 33*8(sp)
-    ld t2, 2*8(sp)
-    csrw sstatus, t0
-    csrw sepc, t1
+    ld t0, 1*8(sp)
+    ld t1, 2*8(sp)
+    csrw sepc, t0
+    csrw sstatus, t1
+    ld tp, 4*8(sp)
+
+    # 恢复通用寄存器（逆映射）
+    ld x11, 5*8(sp)              # a1  ← x1
+    ld x12, 6*8(sp)              # a2  ← x2
+    ld x13, 7*8(sp)              # a3  ← x3
+    ld x14, 8*8(sp)              # a4  ← x4
+    ld x15, 9*8(sp)              # a5  ← x5
+    ld x16, 10*8(sp)             # a6  ← x6
+    ld x17, 11*8(sp)             # a7  ← x7
+    # x8 不单独恢复（与 x7 同为 a7）
+    ld x1,  13*8(sp)             # ra  ← x9
+    # sp 稍后恢复
+    ld x3,  15*8(sp)             # gp  ← x11
+    ld x4,  16*8(sp)             # tp  ← x12
+    ld x5,  17*8(sp)             # t0  ← x13
+    ld x6,  18*8(sp)             # t1  ← x14
+    ld x7,  19*8(sp)             # t2  ← x15
+    ld x8,  20*8(sp)             # s0  ← x16
+    ld x9,  21*8(sp)             # s1  ← x17
+    ld x18, 22*8(sp)             # s2  ← x18
+    ld x19, 23*8(sp)             # s3  ← x19
+    ld x20, 24*8(sp)             # s4  ← x20
+    ld x21, 25*8(sp)             # s5  ← x21
+    ld x22, 26*8(sp)             # s6  ← x22
+    ld x23, 27*8(sp)             # s7  ← x23
+    ld x24, 28*8(sp)             # s8  ← x24
+    ld x25, 29*8(sp)             # s9  ← x25
+    ld x26, 30*8(sp)             # s10 ← x26
+    ld x27, 31*8(sp)             # s11 ← x27
+    ld x28, 32*8(sp)             # t3  ← x28
+    ld x29, 33*8(sp)             # t4  ← x29
+    ld x30, 34*8(sp)             # t5  ← x30
+    ld x10, 35*8(sp)             # a0  ← x0
+
+    # 恢复用户 sp 到 sscratch，释放 TrapFrame
+    ld t2, 3*8(sp)
     csrw sscratch, t2
-    # 现在sscarch指向的是用户栈
-    # `return_to_user` general-purpuse registers except sp/tp
-    ld x1, 1*8(sp)
-    ld x3, 3*8(sp)
-    # 跳过内核tp
-    .set n, 5
-    .rept 27
-        LOAD_GP %n
-        .set n, n+1
-    .endr
-    # 保存内核tp到kernel_tp
-    sd x4, 35*8(sp)
-    # 恢复用户tp
-    ld x4, 4*8(sp)
-    # release TrapContext on kernel stack
     addi sp, sp, 36*8
     csrrw sp, sscratch, sp
-    # 现在sp指向的是用户栈, sscratch指向的是内核栈, 然后返回到用户态
-    # 置sstatus的SPP位为0, 表示返回到用户态
-    csrc sstatus, 8 
+
+    la t0, __trap_from_user
+    csrw stvec, t0
     sret
 
-# Todo: 这个在使用内核栈保存信息的情况, 是可以做到的, 详细可能
+# ── 内核态 trap 入口 ──────────────────────────────────────────────────────
 __trap_from_kernel:
-    # # 交换sp和sscratch的值
-    # csrrw sp, sscratch, sp
-    # 相较于__trap_from_user, 这里不用换栈, 因为本身就在内核
-    # allocate another TrapContext on kernel stack
-    addi sp, sp, -34*8
-    # save general-purpose registers
-    sd x1, 1*8(sp)
-    # skip sp(x2), we will save it later
-    # save x3~x31
-    .set n, 3
-    .rept 29
-        SAVE_GP %n
-        .set n, n+1
-    .endr
-    # we can use t0/t1/t2 freely, because they were saved on kernel stack
-    csrr t0, sstatus
-    csrr t1, sepc
-    sd t0, 32*8(sp)
-    sd t1, 33*8(sp)
-    sd sp, 2*8(sp)
-    # 第一个参数是TrapContext在内核栈上的地址, 通过a0传递
+    addi sp, sp, -36*8           # 分配 TrapFrame（不换栈）
+
+    csrr t0, sepc
+    csrr t1, sstatus
+    sd t0, 1*8(sp)
+    sd t1, 2*8(sp)
+    sd sp, 3*8(sp)               # 注意：此时 sp 已指向 TrapFrame
+    sd tp, 4*8(sp)
+
+    sd x10, 35*8(sp)
+    sd x11, 5*8(sp)
+    sd x12, 6*8(sp)
+    sd x13, 7*8(sp)
+    sd x14, 8*8(sp)
+    sd x15, 9*8(sp)
+    sd x16, 10*8(sp)
+    sd x17, 11*8(sp)
+    sd x17, 12*8(sp)
+    sd x1,  13*8(sp)
+    sd x2,  14*8(sp)
+    sd x3,  15*8(sp)
+    sd x4,  16*8(sp)
+    sd x5,  17*8(sp)
+    sd x6,  18*8(sp)
+    sd x7,  19*8(sp)
+    sd x8,  20*8(sp)
+    sd x9,  21*8(sp)
+    sd x18, 22*8(sp)
+    sd x19, 23*8(sp)
+    sd x20, 24*8(sp)
+    sd x21, 25*8(sp)
+    sd x22, 26*8(sp)
+    sd x23, 27*8(sp)
+    sd x24, 28*8(sp)
+    sd x25, 29*8(sp)
+    sd x26, 30*8(sp)
+    sd x27, 31*8(sp)
+    sd x28, 32*8(sp)
+    sd x29, 33*8(sp)
+    sd x30, 34*8(sp)
+
+    csrr t0, scause
+    srli t0, t0, 63
+    slli t0, t0, 16
+    li   t1, 1                   # 内核态 source = 1
+    or   t0, t0, t1
+    sd   t0, 0*8(sp)
+
     mv a0, sp
-    call kernel_trap_handler
-    # 内核态的trap_handler返回后, 恢复内核态的上下文
-    ld t0, 32*8(sp)
-    ld t1, 33*8(sp)
-    # Todo: 这里是不是不用保存和恢复sstatus
-    csrw sstatus, t0
-    csrw sepc, t1
-    # sp
-    ld x1, 1*8(sp)
-    # restore x3~x31
-    .set n, 3
-    .rept 29
-        LOAD_GP %n
-        .set n, n+1
-    .endr
-    # release TrapContext on kernel stack
-    addi sp, sp, 34*8
+    call trap_handler
+
+    # 恢复上下文
+    ld t0, 1*8(sp)
+    ld t1, 2*8(sp)
+    csrw sepc, t0
+    csrw sstatus, t1
+    ld tp, 4*8(sp)
+
+    ld x11, 5*8(sp)
+    ld x12, 6*8(sp)
+    ld x13, 7*8(sp)
+    ld x14, 8*8(sp)
+    ld x15, 9*8(sp)
+    ld x16, 10*8(sp)
+    ld x17, 11*8(sp)
+    ld x1,  13*8(sp)
+    ld x3,  15*8(sp)
+    ld x4,  16*8(sp)
+    ld x5,  17*8(sp)
+    ld x6,  18*8(sp)
+    ld x7,  19*8(sp)
+    ld x8,  20*8(sp)
+    ld x9,  21*8(sp)
+    ld x18, 22*8(sp)
+    ld x19, 23*8(sp)
+    ld x20, 24*8(sp)
+    ld x21, 25*8(sp)
+    ld x22, 26*8(sp)
+    ld x23, 27*8(sp)
+    ld x24, 28*8(sp)
+    ld x25, 29*8(sp)
+    ld x26, 30*8(sp)
+    ld x27, 31*8(sp)
+    ld x28, 32*8(sp)
+    ld x29, 33*8(sp)
+    ld x30, 34*8(sp)
+    ld x10, 35*8(sp)
+
+    addi sp, sp, 36*8
     sret
 
+# ── 进入用户态（run_user(ctx: &mut UserContext)）─────────────────────────
+# a0 = &mut UserContext（布局与 TrapFrame 相同）
+run_user:
+    csrw sscratch, sp           # 保存内核栈指针到 sscratch
 
+    ld t0, 8(a0)                # elr
+    ld t1, 16(a0)               # spsr
+    ld t2, 24(a0)               # sp
+    ld tp, 32(a0)               # tpidr
+    csrw sepc, t0
+    csrw sstatus, t1
+
+    # 载入通用寄存器
+    ld x11, 40(a0)              # a1  ← x1
+    ld x12, 48(a0)              # a2  ← x2
+    ld x13, 56(a0)              # a3  ← x3
+    ld x14, 64(a0)              # a4  ← x4
+    ld x15, 72(a0)              # a5  ← x5
+    ld x16, 80(a0)              # a6  ← x6
+    ld x17, 88(a0)              # a7  ← x7
+    ld x1,  104(a0)             # ra  ← x9
+    ld x3,  120(a0)             # gp  ← x11
+    ld x4,  128(a0)             # tp  ← x12
+    ld x5,  136(a0)             # t0  ← x13
+    ld x6,  144(a0)             # t1  ← x14
+    ld x7,  152(a0)             # t2  ← x15
+    ld x8,  160(a0)             # s0  ← x16
+    ld x9,  168(a0)             # s1  ← x17
+    ld x18, 176(a0)             # s2  ← x18
+    ld x19, 184(a0)             # s3  ← x19
+    ld x20, 192(a0)             # s4  ← x20
+    ld x21, 200(a0)             # s5  ← x21
+    ld x22, 208(a0)             # s6  ← x22
+    ld x23, 216(a0)             # s7  ← x23
+    ld x24, 224(a0)             # s8  ← x24
+    ld x25, 232(a0)             # s9  ← x25
+    ld x26, 240(a0)             # s10 ← x26
+    ld x27, 248(a0)             # s11 ← x27
+    ld x28, 256(a0)             # t3  ← x28
+    ld x29, 264(a0)             # t4  ← x29
+    ld x30, 272(a0)             # t5  ← x30
+    ld x10, 280(a0)             # a0  ← x0
+
+    csrw sscratch, t2           # sscratch = 用户 sp
+
+    la t0, __trap_from_user
+    csrw stvec, t0
+    sret

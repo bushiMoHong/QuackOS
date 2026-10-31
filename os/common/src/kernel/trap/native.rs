@@ -85,8 +85,7 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
     /*
     if tid.0 & 0xFFFF == 2 || tid.0 & 0xFFFF == 0 {
         let name = super::native_syscall_name(nr as usize);
-        let sp: usize;
-        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
+        let sp = crate::arch::base::cpu::get_sp();
         // crate::print_uart("[N:");
         // crate::print_uart(name);
         // crate::print_uart("] tid=");
@@ -157,8 +156,7 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
     /*
     let tid = crate::kernel::sche::current_thread();
     if tid.0 & 0xFFFF == 2 || tid.0 & 0xFFFF == 0 {
-        let sp: usize;
-        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
+        let sp = crate::arch::base::cpu::get_sp();
         crate::print_uart("[N:done] tid=");
         crate::print_uart_hex(tid.0 as u64);
         crate::print_uart(" nr=");
@@ -178,14 +176,13 @@ pub fn native_syscall_dispatch(nr: u64, tf: &mut TrapFrame) {
 // Helper: get a PageTable for the *current* thread's address space.
 // Reads TTBR0_EL1 so we operate on the correct isolated page table, not
 // the kernel shared one.  Boot threads with TTBR0=0 fall back to KERNEL_L0_PA.
-fn current_page_table() -> aarch64::base::mm::page_table::PageTable {
-    let ttbr0: usize;
-    unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) ttbr0); }
+fn current_page_table() -> crate::arch::base::mm::page_table::PageTable {
+    let ttbr0 = crate::arch::base::cpu::get_page_table_root();
     if ttbr0 != 0 {
-        aarch64::base::mm::page_table::PageTable::from_token(ttbr0)
+        crate::arch::base::mm::page_table::PageTable::from_token(ttbr0)
     } else {
         let l0 = crate::KERNEL_L0_PA.lock();
-        aarch64::base::mm::page_table::PageTable::from_token(*l0)
+        crate::arch::base::mm::page_table::PageTable::from_token(*l0)
     }
 }
 
@@ -215,16 +212,16 @@ fn sys_map_page(tf: &mut TrapFrame) {
     }
 
     // Build PTEFlags
-    let mut flags = aarch64::base::mm::page_table::PTEFlags::empty();
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::V);
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::A);
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::D);
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::U);
-    if prot & 1 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::R); }
-    if prot & 2 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::W); }
-    if prot & 4 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::X); }
+    let mut flags = crate::arch::base::mm::page_table::PTEFlags::empty();
+    flags.insert(crate::arch::base::mm::page_table::PTEFlags::V);
+    flags.insert(crate::arch::base::mm::page_table::PTEFlags::A);
+    flags.insert(crate::arch::base::mm::page_table::PTEFlags::D);
+    flags.insert(crate::arch::base::mm::page_table::PTEFlags::U);
+    if prot & 1 != 0 { flags.insert(crate::arch::base::mm::page_table::PTEFlags::R); }
+    if prot & 2 != 0 { flags.insert(crate::arch::base::mm::page_table::PTEFlags::W); }
+    if prot & 4 != 0 { flags.insert(crate::arch::base::mm::page_table::PTEFlags::X); }
 
-    use aarch64::base::mm::VirtPageNum;
+    use crate::arch::base::mm::VirtPageNum;
     let vpn = VirtPageNum::from(vaddr >> 12);
     let mut pt = current_page_table();
 
@@ -237,7 +234,7 @@ fn sys_map_page(tf: &mut TrapFrame) {
     }
 
     // Allocate a physical page
-    let pa = match aarch64::base::mm::alloc_page() {
+    let pa = match crate::arch::base::mm::alloc_page() {
         Some(pa) => pa,
         None => {
             tf.general.x0 = (-ENOMEM) as usize;
@@ -246,10 +243,10 @@ fn sys_map_page(tf: &mut TrapFrame) {
     };
 
     // Zero the page
-    unsafe { core::ptr::write_bytes(pa as *mut u8, 0, aarch64::base::config::PAGE_SIZE); }
+    unsafe { core::ptr::write_bytes(pa as *mut u8, 0, crate::arch::base::config::PAGE_SIZE); }
 
     // Map into current address space
-    use aarch64::base::mm::PhysPageNum;
+    use crate::arch::base::mm::PhysPageNum;
     let ppn = PhysPageNum::from(pa >> 12);
 
     pt.map(vpn, ppn, flags);
@@ -269,13 +266,13 @@ fn sys_unmap_page(tf: &mut TrapFrame) {
     }
 
     let mut pt = current_page_table();
-    let vpn = aarch64::base::mm::VirtPageNum::from(vaddr >> 12);
+    let vpn = crate::arch::base::mm::VirtPageNum::from(vaddr >> 12);
 
     // Find the PTE to get the physical address for freeing
     if let Some(pte) = pt.find_pte(vpn) {
-        let pa = pte.ppn().0 << aarch64::base::config::PAGE_SHIFT;
+        let pa = pte.ppn().0 << crate::arch::base::config::PAGE_SHIFT;
         pt.unmap(vpn);
-        aarch64::base::mm::free_page(pa);
+        crate::arch::base::mm::free_page(pa);
         tf.general.x0 = 0;
     } else {
         tf.general.x0 = (-EINVAL) as usize;
@@ -437,8 +434,7 @@ fn sys_ipc_call(tf: &mut TrapFrame) {
     // Save tf pointer for debug comparison
     let tf_ptr_before: usize = tf as *const TrapFrame as usize;
     // Read x19 via asm to compare with Rust-level tf reference
-    let x19_before: usize;
-    unsafe { core::arch::asm!("mov {}, x19", out(reg) x19_before); }
+    let x19_before = crate::arch::base::cpu::get_tcb_ptr();
 
     // Send phase: set up registers and call sys_ipc_send
     let saved_x0 = tf.general.x0; let saved_x1 = tf.general.x1; let saved_x2 = tf.general.x2;
@@ -455,8 +451,7 @@ fn sys_ipc_call(tf: &mut TrapFrame) {
 
     // DEBUG: check if tf changed during recv
     let tf_ptr_after: usize = tf as *const TrapFrame as usize;
-    let x19_after: usize;
-    unsafe { core::arch::asm!("mov {}, x19", out(reg) x19_after); }
+    let x19_after = crate::arch::base::cpu::get_tcb_ptr();
     let tid = crate::kernel::sche::current_thread();
     if false && tid.0 & 0xFFFF <= 3 {
         // crate::print_uart("[ipc_call_debug] tid=");
@@ -487,8 +482,7 @@ extern "C" fn thread_trampoline(_next_sp: usize) -> ! {
     // tf_addr was stored in x20 when the TaskContext was built.
     // We read it via inline asm to avoid any dependency on x0,
     // which can be clobbered between __switch's `mov x0, x1` and here.
-    let tf_ptr: usize;
-    unsafe { core::arch::asm!("mov {}, x20", out(reg) tf_ptr); }
+    let tf_ptr = crate::arch::base::cpu::get_tf_ptr();
     let ctx = unsafe { &mut *(tf_ptr as *mut crate::kernel::trap::UserContext) };
     ctx.run();
     // run() delegates to assembly run_user → trap_return → eret.
@@ -508,13 +502,13 @@ fn sys_create_thread(tf: &mut TrapFrame) {
     let stack_top = tf.general.x1;
     let arg = tf.general.x2;
 
-    use aarch64::base::mm::alloc_page;
-    use aarch64::base::config::PAGE_SIZE;
+    use crate::arch::base::mm::alloc_page;
+    use crate::arch::base::config::PAGE_SIZE;
     use crate::kernel::sche::{self, enqueue_ready};
     use core::ptr::write_volatile;
 
     // Allocate kernel stack (8 physically contiguous pages = 32 KB, zeroed)
-    let stack_base = match aarch64::base::mm::alloc_pages_contig(8) {
+    let stack_base = match crate::arch::base::mm::alloc_pages_contig(8) {
         Some(p) => p,
         None => { tf.general.x0 = (-ENOMEM) as usize; return; }
     };
@@ -553,7 +547,7 @@ fn sys_create_thread(tf: &mut TrapFrame) {
     } {
         Ok(tid) => tid,
         Err(_) => {
-            aarch64::base::mm::free_page_range(stack_base, stack_base + 8 * PAGE_SIZE);
+            crate::arch::base::mm::free_page_range(stack_base, stack_base + 8 * PAGE_SIZE);
             tf.general.x0 = (-ENOMEM) as usize;
             return;
         }
@@ -724,17 +718,17 @@ fn sys_mprotect(tf: &mut TrapFrame) {
         return;
     }
 
-    let mut flags = aarch64::base::mm::page_table::PTEFlags::empty();
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::V);
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::A);
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::D);
-    flags.insert(aarch64::base::mm::page_table::PTEFlags::U);
-    if prot & 1 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::R); }
-    if prot & 2 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::W); }
-    if prot & 4 != 0 { flags.insert(aarch64::base::mm::page_table::PTEFlags::X); }
+    let mut flags = crate::arch::base::mm::page_table::PTEFlags::empty();
+    flags.insert(crate::arch::base::mm::page_table::PTEFlags::V);
+    flags.insert(crate::arch::base::mm::page_table::PTEFlags::A);
+    flags.insert(crate::arch::base::mm::page_table::PTEFlags::D);
+    flags.insert(crate::arch::base::mm::page_table::PTEFlags::U);
+    if prot & 1 != 0 { flags.insert(crate::arch::base::mm::page_table::PTEFlags::R); }
+    if prot & 2 != 0 { flags.insert(crate::arch::base::mm::page_table::PTEFlags::W); }
+    if prot & 4 != 0 { flags.insert(crate::arch::base::mm::page_table::PTEFlags::X); }
 
     let mut pt = current_page_table();
-    let vpn = aarch64::base::mm::VirtPageNum::from(vaddr >> 12);
+    let vpn = crate::arch::base::mm::VirtPageNum::from(vaddr >> 12);
 
     match pt.find_pte(vpn) {
         Some(_) => {
@@ -831,7 +825,7 @@ fn sys_spawn(tf: &mut TrapFrame) {
 
     // Full TLB flush so the new page table can be used
     unsafe {
-        core::arch::asm!("dsb ish; tlbi vmalle1is; dsb ish; isb");
+        crate::arch::base::cpu::tlb_flush_all();
     }
 
     tf.general.x0 = tid.0 as usize;
@@ -854,7 +848,7 @@ fn sys_clone(tf: &mut TrapFrame) {
     use crate::kernel::bmm;
     use crate::kernel::sche;
     use crate::usr::proc::elf_loader;
-    use aarch64::base::mm::{alloc_page, alloc_pages_contig, free_page, free_page_range, watch_pa_range, VirtAddr};
+    use crate::arch::base::mm::{alloc_page, alloc_pages_contig, free_page, free_page_range, watch_pa_range, VirtAddr};
     use core::ptr::write_volatile;
 
     let flags          = tf.general.x0;
@@ -910,7 +904,7 @@ fn sys_clone(tf: &mut TrapFrame) {
     unsafe { write_volatile(child_save_pa as *mut u64, 0u64); }
 
     // ── 5. Allocate kernel stack for the child (contiguous, zeroed) ─────
-    let ks_base = match aarch64::base::mm::alloc_pages_contig(8) {
+    let ks_base = match crate::arch::base::mm::alloc_pages_contig(8) {
         Some(p) => p,
         None => { tf.general.x0 = (-ENOMEM) as usize; return; }
     };
@@ -1049,7 +1043,7 @@ fn sys_clone(tf: &mut TrapFrame) {
     sche::enqueue_ready(child_tid, prio).ok();
 
     // ── 13. Full TLB flush so the new AS is usable ──────────────────────
-    unsafe { core::arch::asm!("dsb ish; tlbi vmalle1is; dsb ish; isb"); }
+    unsafe { crate::arch::base::cpu::tlb_flush_all(); }
 
     // ── 14. Write child TID into parent's memory if requested ───────────
     if parent_tid_ptr != 0 {
@@ -1166,7 +1160,7 @@ fn sys_exec(tf: &mut TrapFrame) {
     elf_loader::map_user_stack(&mut pt);
 
     // Write BootInfo into the new AS at BOOTINFO_VA
-    let boot_pa = match pt.translate_va_to_pa(aarch64::base::mm::VirtAddr::from(BOOTINFO_VA)) {
+    let boot_pa = match pt.translate_va_to_pa(crate::arch::base::mm::VirtAddr::from(BOOTINFO_VA)) {
         Some(pa) => pa,
         None => {
             tf.general.x0 = (-ENOMEM) as usize;
@@ -1219,23 +1213,14 @@ fn sys_exec(tf: &mut TrapFrame) {
     // crate::print_uart_hex(lib_entry as u64);
     // crate::print_uart("\n");
 
-    unsafe {
-        core::arch::asm!(
-            "msr ttbr0_el1, {ttbr}",
-            "isb",
-            "tlbi vmalle1is",
-            "dsb ish",
-            "isb",
-            ttbr = in(reg) new_ttbr0,
-        );
-    }
+    crate::arch::base::cpu::set_page_table_root(new_ttbr0);
 
     // Detach liblinux PTEs from the old page table BEFORE freeing it.
     if old_asid_val != 0 {
         let old_asid = bmm::AddressSpaceId(old_asid_val);
         let _ = bmm::with_page_table_mut(old_asid, |old_pt| {
-            use aarch64::base::mm::VirtPageNum;
-            let page_size = aarch64::base::config::PAGE_SIZE;
+            use crate::arch::base::mm::VirtPageNum;
+            let page_size = crate::arch::base::config::PAGE_SIZE;
             let mut va = lib_start & !(page_size - 1);
             let end = (lib_end + page_size - 1) & !(page_size - 1);
             while va < end {

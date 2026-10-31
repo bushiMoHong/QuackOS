@@ -455,7 +455,7 @@ pub fn destroy_thread(id: ThreadId) -> Result<(), ScheError> {
     if ks_base != 0 {
         // Check for physical overlap with any page table before freeing
         crate::kernel::bmm::check_all_as_overlap(ks_base, ks_end);
-        aarch64::base::mm::free_page_range(ks_base, ks_end);
+        crate::arch::base::mm::free_page_range(ks_base, ks_end);
     }
 
     log::info!("sche: destroyed thread {:?}", id);
