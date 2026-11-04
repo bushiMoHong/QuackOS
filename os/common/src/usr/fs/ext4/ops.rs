@@ -26,11 +26,34 @@ impl InodeOp for Ext4Inode {
     }
 
     fn read(&self, offset: usize, buf: &mut [u8]) -> usize {
-        self.read(offset, buf).unwrap_or(0)
+        match self.read(offset, buf) {
+            Ok(n) => n,
+            Err(e) => {
+                crate::print_uart("[ext4.read] ERR off=");
+                crate::print_uart_hex(offset as u64);
+                crate::print_uart(" len=");
+                crate::print_uart_hex(buf.len() as u64);
+                crate::print_uart(" errno=");
+                crate::print_uart_hex(e as i64 as u64);
+                crate::print_uart("\n");
+                0
+            }
+        }
     }
 
     fn write(&self, offset: usize, buf: &[u8]) -> usize {
-        self.write(offset, buf)
+        let n = self.write(offset, buf);
+        // 只在异常时打，避免刷屏
+        if n != buf.len() {
+            crate::print_uart("[ext4.write] SHORT off=");
+            crate::print_uart_hex(offset as u64);
+            crate::print_uart(" req=");
+            crate::print_uart_hex(buf.len() as u64);
+            crate::print_uart(" ret=");
+            crate::print_uart_hex(n as u64);
+            crate::print_uart("\n");
+        }
+        n
     }
 
     fn truncate(&self, size: usize) -> SyscallRet {

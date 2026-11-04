@@ -70,31 +70,31 @@ impl Ext4DirEntry {
 impl TryFrom<&[u8]> for Ext4DirEntry {
     type Error = &'static str;
 
-    // 这个会根据name_len来读取name
     fn try_from(buf: &[u8]) -> Result<Self, Self::Error> {
+        // 头部至少 8 字节
+        if buf.len() < 8 {
+            return Err("ext4 dirent: buf shorter than 8 bytes");
+        }
         let inode_num = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
         let rec_len = u16::from_le_bytes([buf[4], buf[5]]);
-        debug_assert!(
-            buf.len() >= rec_len as usize,
-            "buf.len(): {}, rec_len: {}",
-            buf.len(),
-            rec_len
-        );
+
+        // rec_len 必须 >= 8、4 对齐、且不超出 buf
+        if (rec_len as usize) < 8
+            || (rec_len as usize) % 4 != 0
+            || (rec_len as usize) > buf.len()
+        {
+            return Err("ext4 dirent: invalid rec_len");
+        }
+
         let name_len = buf[6];
         let file_type = buf[7];
-        debug_assert!(
-            rec_len >= 8 + name_len as u16,
-            "rec_len: {}, name_len: {}",
-            rec_len,
-            name_len
-        );
+
+        // name 必须落在 rec_len 内
+        if 8 + name_len as usize > rec_len as usize {
+            return Err("ext4 dirent: name_len overflows rec_len");
+        }
+
         let name = buf[8..(8 + name_len as usize)].to_vec();
-        Ok(Self {
-            inode_num,
-            rec_len,
-            name_len,
-            file_type,
-            name,
-        })
+        Ok(Self { inode_num, rec_len, name_len, file_type, name })
     }
 }

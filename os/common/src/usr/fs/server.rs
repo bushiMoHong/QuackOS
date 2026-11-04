@@ -154,11 +154,11 @@ pub struct FsServer {
 impl FsServer {
     pub fn new(root_inode: Arc<dyn InodeOp>) -> Self {
         let root = Dentry::new("/".into(), None, DentryFlags::DIRECTORY, Some(root_inode));
-        print_uart("[fs] root dentry created, inode=");
-        print_uart(if root.inode.read().is_some() { "Y" } else { "N" });
-        print_uart(" neg=");
-        print_uart(if root.is_negative() { "Y" } else { "N" });
-        print_uart("\n");
+        // print_uart("[fs] root dentry created, inode=");
+        // print_uart(if root.inode.read().is_some() { "Y" } else { "N" });
+        // print_uart(" neg=");
+        // print_uart(if root.is_negative() { "Y" } else { "N" });
+        // print_uart("\n");
         Self {
             root,
             fd_tables: RwLock::new(BTreeMap::new()),
@@ -177,11 +177,11 @@ impl FsServer {
             .filter(|s| !s.is_empty())
             .collect();
 
-        print_uart("[walk] path=");
-        print_uart(path);
-        print_uart(" comps=");
-        print_uart_hex(components.len() as u64);
-        print_uart("\n");
+        // print_uart("[walk] path=");
+        // print_uart(path);
+        // print_uart(" comps=");
+        // print_uart_hex(components.len() as u64);
+        // print_uart("\n");
 
         if components.is_empty() {
             return Ok((root.clone(), root.clone()));
@@ -189,14 +189,14 @@ impl FsServer {
 
         let mut current = root.clone();
         for &name in &components[..components.len() - 1] {
-            print_uart("[walk] comp=");
-            print_uart(name);
-            print_uart(" parent_inode=");
-            print_uart(if current.inode.read().is_some() { "Y" } else { "N" });
-            print_uart("\n");
+            // print_uart("[walk] comp=");
+            // print_uart(name);
+            // print_uart(" parent_inode=");
+            // print_uart(if current.inode.read().is_some() { "Y" } else { "N" });
+            // print_uart("\n");
 
             let next = if let Some(child) = current.lookup_child(name) {
-                print_uart("[walk]   dcache hit\n");
+                // print_uart("[walk]   dcache hit\n");
                 child
             } else {
                 // 关键：把 inode_opt 的借用限制在块内，避免持锁打印
@@ -208,7 +208,7 @@ impl FsServer {
                 };
                 match maybe_child {
                     Some(child) => {
-                        dbg_dentry("[walk]   lookup", &child);
+                        // dbg_dentry("[walk]   lookup", &child);
                         current
                             .children
                             .write()
@@ -216,7 +216,7 @@ impl FsServer {
                         child
                     }
                     None => {
-                        print_uart("[walk]   parent inode is None -> ENOENT\n");
+                        // print_uart("[walk]   parent inode is None -> ENOENT\n");
                         return Err(Errno::ENOENT);
                     }
                 }
@@ -225,14 +225,14 @@ impl FsServer {
         }
 
         let last_name = components.last().unwrap();
-        print_uart("[walk] last=");
-        print_uart(last_name);
-        print_uart(" parent_inode=");
-        print_uart(if current.inode.read().is_some() { "Y" } else { "N" });
-        print_uart("\n");
+        // print_uart("[walk] last=");
+        // print_uart(last_name);
+        // print_uart(" parent_inode=");
+        // print_uart(if current.inode.read().is_some() { "Y" } else { "N" });
+        // print_uart("\n");
 
         let target = if let Some(child) = current.lookup_child(last_name) {
-            print_uart("[walk]   dcache hit\n");
+            // print_uart("[walk]   dcache hit\n");
             child
         } else {
             let maybe_child = {
@@ -243,7 +243,7 @@ impl FsServer {
             };
             match maybe_child {
                 Some(child) => {
-                    dbg_dentry("[walk]   lookup", &child);
+                    // dbg_dentry("[walk]   lookup", &child);
                     current
                         .children
                         .write()
@@ -251,7 +251,7 @@ impl FsServer {
                     child
                 }
                 None => {
-                    print_uart("[walk]   parent inode is None -> ENOENT\n");
+                    // print_uart("[walk]   parent inode is None -> ENOENT\n");
                     return Err(Errno::ENOENT);
                 }
             }
@@ -268,24 +268,24 @@ impl FsServer {
         flags: OpenFlags,
         _mode: u16,
     ) -> Result<usize, Errno> {
-        print_uart("[open] path=");
-        print_uart(path);
-        print_uart("\n");
+        // print_uart("[open] path=");
+        // print_uart(path);
+        // print_uart("\n");
 
         let (dentry, _parent) = match Self::path_walk(&self.root, path) {
             Ok(v) => v,
             Err(e) => {
-                print_uart("[open] path_walk Err errno=");
-                print_uart_hex(e as i64 as u64);
-                print_uart("\n");
+                // print_uart("[open] path_walk Err errno=");
+                // print_uart_hex(e as i64 as u64);
+                // print_uart("\n");
                 return Err(e);
             }
         };
 
-        dbg_dentry("[open] result", &dentry);
+        // dbg_dentry("[open] result", &dentry);
 
         if dentry.is_negative() && !flags.contains(OpenFlags::O_CREAT) {
-            print_uart("[open] negative dentry + no O_CREAT -> ENOENT\n");
+            // print_uart("[open] negative dentry + no O_CREAT -> ENOENT\n");
             return Err(Errno::ENOENT);
         }
 
@@ -518,6 +518,12 @@ impl FsServer {
                         let mut buf = vec![0u8; count.min(240)]; // 256 - 8 retval - 8 actual_len
                         match file.read(&mut buf) {                    // ← 改这里
                             Ok(n) => {
+                                print_uart("[op_read] req=");
+                                print_uart_hex(count as u64);
+                                print_uart(" ret=");
+                                print_uart_hex(n as u64);
+                                print_uart("\n");
+
                                 buf.truncate(n);
                                 resp[0..8].copy_from_slice(&0i64.to_le_bytes());
                                 resp[8..16].copy_from_slice(&(n as u64).to_le_bytes());
@@ -578,11 +584,15 @@ impl FsServer {
                 }
             }
             OP_WRITE => {
-                // req: [op:u8][fid:u64 LE][len:u64 LE][data...]
-                let fd = u64::from_le_bytes(req.get(1..9).map(|s| s.try_into().unwrap()).unwrap_or([0; 8])) as usize;
-                let data_len = u64::from_le_bytes(req.get(9..17).map(|s| s.try_into().unwrap()).unwrap_or([0; 8])) as usize;
-                let data = &req.get(17..).unwrap_or(&[]);
-                let n = data.len().min(data_len);
+                // 新协议：[op:1][fd:8][len:2][data...]
+                let fd = u64::from_le_bytes(
+                    req.get(1..9).map(|s| s.try_into().unwrap()).unwrap_or([0; 8])
+                ) as usize;
+                let len = u16::from_le_bytes(
+                    req.get(9..11).map(|s| s.try_into().unwrap()).unwrap_or([0; 2])
+                ) as usize;
+                let data = req.get(11..).unwrap_or(&[]);
+                let n = data.len().min(len);            // 用 len 截掉 padding
                 match self.write(0, fd, &data[..n]) {
                     Ok(written) => {
                         resp[0..8].copy_from_slice(&0i64.to_le_bytes());

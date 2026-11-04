@@ -6,6 +6,9 @@ use spin::RwLock;
 use super::dentry::Dentry;
 use super::types::{OpenFlags, SeekWhence, Errno};
 
+use crate::print_uart_hex;
+use crate::print_uart;
+
 /// An open file — holds a reference to the dentry, a cursor position,
 /// and the open flags.
 pub struct File {
@@ -37,7 +40,18 @@ impl File {
         let inode_guard = self.dentry.inode.read();
         let inode = inode_guard.as_ref().ok_or(Errno::EIO)?;
         let pos = *self.pos.read();
+
+        print_uart("[file.read] pos=");
+        print_uart_hex(pos as u64);
+        print_uart(" len=");
+        print_uart_hex(buf.len() as u64);
+
         let n = inode.read(pos, buf);
+
+        print_uart(" n=");
+        print_uart_hex(n as u64);
+        print_uart("\n");
+
         if n > 0 {
             *self.pos.write() += n;
         }

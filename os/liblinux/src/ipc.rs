@@ -69,20 +69,41 @@ pub fn fs_read(fid: u64, buf: &mut [u8]) -> Result<usize, isize> {
 
 /// Write to a file.
 pub fn fs_write(fid: u64, buf: &[u8]) -> Result<usize, isize> {
-    let mut req = [0u8; IPC_MAX];
-    req[0] = OP_WRITE;
-    req[1..9].copy_from_slice(&fid.to_le_bytes());
-    let data_len = buf.len().min(IPC_MAX - 17);
-    req[9..17].copy_from_slice(&(data_len as u64).to_le_bytes());
-    req[17..17 + data_len].copy_from_slice(&buf[..data_len]);
+    // 新协议：[op:1][fd:8][len:2][data...]
+    // 头部 11 字节，数据区 IPC_MAX - 11 = 245 字节
+    const HDR: usize = 11;
+    const MAX_CHUNK: usize = IPC_MAX - HDR;
 
-    let mut resp = [0u8; IPC_MAX];
-    let ret = unsafe { native::ipc_call(FS_CHANNEL, req.as_ptr() as usize, IPC_MAX,
-                                         resp.as_mut_ptr() as usize, IPC_MAX) };
-    if ret < 0 { return Err(-ret); }
-    let err = i64::from_le_bytes(resp[0..8].try_into().unwrap());
-    if err < 0 { return Err(-err as isize); }
-    Ok(u64::from_le_bytes(resp[8..16].try_into().unwrap()) as usize)
+    let mut total = 0usize;
+    while total < buf.len() {
+        let chunk = (buf.len() - total).min(MAX_CHUNK);
+
+        let mut req = [0u8; IPC_MAX];
+        req[0] = OP_WRITE;
+        req[1..9].copy_from_slice(&fid.to_le_bytes());
+        req[9..11].copy_from_slice(&(chunk as u16).to_le_bytes());
+        req[HDR..HDR + chunk].copy_from_slice(&buf[total..total + chunk]);
+
+        let mut resp = [0u8; IPC_MAX];
+        let ret = unsafe {
+            native::ipc_call(FS_CHANNEL, req.as_ptr() as usize, IPC_MAX,
+                             resp.as_mut_ptr() as usize, IPC_MAX)
+        };
+        // IPC 传输失败：已经写了一部分时按 POSIX 返回已写字节数
+        if ret < 0 {
+            return if total > 0 { Ok(total) } else { Err(-ret) };
+        }
+        let err = i64::from_le_bytes(resp[0..8].try_into().unwrap());
+        if err < 0 {
+            return if total > 0 { Ok(total) } else { Err(-err as isize) };
+        }
+        let written = u64::from_le_bytes(resp[8..16].try_into().unwrap()) as usize;
+        if written == 0 {
+            break; // 防死循环
+        }
+        total += written;
+    }
+    Ok(total)
 }
 
 /// Close a file.

@@ -163,19 +163,35 @@ pub fn read(fid: u64, buf: &mut [u8]) -> Result<usize, isize> {
 /// Write to a file.
 ///
 /// Returns the number of bytes written.
+///
+/// Protocol (must match FsServer's OP_WRITE): `[op:1][fd:8][len:2][data...]`.
+/// Header is 11 bytes, leaving IPC_MAX - 11 = 245 bytes of data per message.
+/// Large writes are split into multiple IPC calls.
 pub fn write(fid: u64, buf: &[u8]) -> Result<usize, isize> {
-    let mut req = [0u8; IPC_MAX];
-    req[0] = OP_WRITE;
-    req[1..9].copy_from_slice(&fid.to_le_bytes());
-    let data_len = buf.len().min(IPC_MAX - 17);
-    req[9..17].copy_from_slice(&(data_len as u64).to_le_bytes());
-    req[17..17 + data_len].copy_from_slice(&buf[..data_len]);
+    const HDR: usize = 11;
+    const MAX_CHUNK: usize = IPC_MAX - HDR;
 
-    let mut resp = [0u8; IPC_MAX];
-    ipc_call(&req, &mut resp)?;
-    resp_err(&resp)?;
+    let mut total = 0usize;
+    while total < buf.len() {
+        let chunk = (buf.len() - total).min(MAX_CHUNK);
 
-    Ok(u64::from_le_bytes(resp[8..16].try_into().unwrap()) as usize)
+        let mut req = [0u8; IPC_MAX];
+        req[0] = OP_WRITE;
+        req[1..9].copy_from_slice(&fid.to_le_bytes());
+        req[9..11].copy_from_slice(&(chunk as u16).to_le_bytes());
+        req[HDR..HDR + chunk].copy_from_slice(&buf[total..total + chunk]);
+
+        let mut resp = [0u8; IPC_MAX];
+        ipc_call(&req, &mut resp)?;
+        resp_err(&resp)?;
+
+        let written = u64::from_le_bytes(resp[8..16].try_into().unwrap()) as usize;
+        if written == 0 {
+            break; // avoid infinite loop
+        }
+        total += written;
+    }
+    Ok(total)
 }
 
 /// Close a file descriptor returned by [`open`].
